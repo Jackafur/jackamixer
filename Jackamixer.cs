@@ -2352,12 +2352,12 @@ namespace Jackamixer
             if (Preview)
             {
                 if (!activatedOnce) return;
-                // wait until focus has landed: moving to the options window is fine, anywhere else ends both
+                // wait until focus has landed: moving to the options window is fine, anywhere else closes
+                // the options (and the host decides whether the mixer goes too, see ShowOptions)
                 BeginInvoke((Action)(() =>
                 {
                     if (Form.ActiveForm is OptionsDialog || IsDisposed) return;
-                    if (host != null) host.CloseOptions();
-                    Close();
+                    if (host == null || !host.CloseOptions()) Close();
                 }));
                 return;
             }
@@ -2526,9 +2526,12 @@ namespace Jackamixer
             reloadTimer.Start();
         }
 
-        public void CloseOptions()
+        // False when no options window was open.
+        public bool CloseOptions()
         {
-            if (options != null && !options.IsDisposed) options.Close();
+            if (options == null || options.IsDisposed) return false;
+            options.Close();
+            return true;
         }
 
         public void PauseHotkey() { Native.UnregisterHotKey(Handle, 1); }
@@ -2597,8 +2600,15 @@ namespace Jackamixer
                 if (err != null) MessageBox.Show(err, "Jackamixer");
                 if (form != null && !form.IsDisposed)
                 {
-                    // Done/Esc after coming from the mixer: back to it. Otherwise the preview goes too.
-                    if (done && backToMixer) { form.Preview = false; form.Activate(); }
+                    // Came from the mixer: Done/Esc goes back to it, and in toggle mode it stays up
+                    // whatever closed the options (it only goes when the hotkey is pressed).
+                    // Opened from the Start menu, the mixer was only a preview and goes too.
+                    bool toggle = Config.Get("hotkey_mode") == "toggle";
+                    if (backToMixer && (done || toggle))
+                    {
+                        form.Preview = false;
+                        if (done) form.Activate();
+                    }
                     else form.Close();
                 }
                 backToMixer = false;
