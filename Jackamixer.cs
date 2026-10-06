@@ -8,6 +8,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -73,6 +74,8 @@ namespace Jackamixer
     interface IAudioMeterInformation
     {
         [PreserveSig] int GetPeakValue(out float peak);
+        [PreserveSig] int GetMeteringChannelCount(out int count);
+        [PreserveSig] int GetChannelsPeakValues(int count, [Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)] float[] peaks);
     }
 
     [ComImport, Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -206,6 +209,20 @@ namespace Jackamixer
         public abstract float Volume { get; set; }
         public abstract bool Muted { get; set; }
         public abstract float Peak { get; }
+
+        // Left/right peaks for the stereo meters; mono sources report the same value twice.
+        public abstract void StereoPeak(out float left, out float right);
+
+        protected static void ReadStereo(IAudioMeterInformation m, ref float left, ref float right)
+        {
+            int n;
+            if (m == null || m.GetMeteringChannelCount(out n) < 0 || n < 1) return;
+            var peaks = new float[n];
+            if (m.GetChannelsPeakValues(n, peaks) < 0) return;
+            float l = peaks[0], r = n > 1 ? peaks[1] : peaks[0];
+            if (l > left) left = l;
+            if (r > right) right = r;
+        }
     }
 
     class MasterChannel : Channel
@@ -233,6 +250,12 @@ namespace Jackamixer
         public override float Peak
         {
             get { float p; return meter.GetPeakValue(out p) >= 0 ? p : 0f; }
+        }
+
+        public override void StereoPeak(out float left, out float right)
+        {
+            left = 0f; right = 0f;
+            ReadStereo(meter, ref left, ref right);
         }
     }
 
@@ -287,6 +310,12 @@ namespace Jackamixer
                 foreach (var r in Sessions) { float p; if (r.Meter != null && r.Meter.GetPeakValue(out p) >= 0 && p > best) best = p; }
                 return best;
             }
+        }
+
+        public override void StereoPeak(out float left, out float right)
+        {
+            left = 0f; right = 0f;
+            foreach (var r in Sessions) ReadStereo(r.Meter, ref left, ref right);
         }
     }
 
@@ -424,20 +453,38 @@ namespace Jackamixer
     static class Theme
     {
         public static bool Dark = true;
-        public static Color Bg, RowHover, Text, SubText, Track, Thumb, ThumbEdge, Line, Accent, Meter, MeterHot, MeterClip, Hold;
-        public static Font NameFont, GlyphFont, SmallGlyph, GearFont;
+        public static Color Bg, RowHover, Text, SubText, Track, Thumb, ThumbEdge, Line, Accent, WindowsAccent, Meter, MeterHot, MeterClip, Hold, Shadow;
+        public static Font NameFont, TitleFont, GlyphFont, SmallGlyph, GearFont;
 
         public static void Load()
         {
-            try
+            LoadColors();
+            string ui = FontExists("Segoe UI Variable Text") ? "Segoe UI Variable Text" : "Segoe UI";
+            string ic = FontExists("Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";
+            NameFont = new Font(ui, 9.75f);
+            TitleFont = new Font(ui, 14f);
+            GlyphFont = new Font(ic, 13f);
+            SmallGlyph = new Font(ic, 7f);
+            GearFont = new Font(ic, 10f);
+        }
+
+        // Re-read whenever a window opens, so Windows theme/accent changes and the Look tab show up.
+        public static void LoadColors()
+        {
+            bool useWindows = Config.GetBool("use_windows_colors");
+            if (useWindows)
             {
-                using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                try
                 {
-                    object v = k == null ? null : k.GetValue("AppsUseLightTheme");
-                    if (v is int) Dark = (int)v == 0;
+                    using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                    {
+                        object v = k == null ? null : k.GetValue("AppsUseLightTheme");
+                        if (v is int) Dark = (int)v == 0;
+                    }
                 }
+                catch { }
             }
-            catch { }
+            else Dark = Config.Get("theme") != "light";
 
             // Windows 11 default blue; replaced by the user's accent when available.
             Color accForDark = Color.FromArgb(0x60, 0xCD, 0xFF), accForLight = Color.FromArgb(0x00, 0x5F, 0xB8);
@@ -459,24 +506,33 @@ namespace Jackamixer
             {
                 Bg = Hex(0x242424); RowHover = Hex(0x2E2E2E); Text = Hex(0xFFFFFF); SubText = Hex(0xA0A0A0);
                 Track = Hex(0x4A4A4A); Thumb = Hex(0x454545); ThumbEdge = Hex(0x555555); Line = Hex(0x3A3A3A);
-                Accent = accForDark; Meter = Hex(0x6CCB5F); MeterHot = Hex(0xFCE100); MeterClip = Hex(0xFF6B6B); Hold = Hex(0xE0E0E0);
+                Meter = Hex(0x6CCB5F); MeterHot = Hex(0xFCE100); MeterClip = Hex(0xFF6B6B); Hold = Hex(0xE0E0E0); Shadow = Hex(0x000000);
             }
             else
             {
                 Bg = Hex(0xF3F3F3); RowHover = Hex(0xEAEAEA); Text = Hex(0x1A1A1A); SubText = Hex(0x5F5F5F);
                 Track = Hex(0xC8C8C8); Thumb = Hex(0xFFFFFF); ThumbEdge = Hex(0xCFCFCF); Line = Hex(0xE0E0E0);
-                Accent = accForLight; Meter = Hex(0x0F7B0F); MeterHot = Hex(0xC29C00); MeterClip = Hex(0xC42B1C); Hold = Hex(0x404040);
+                Meter = Hex(0x0F7B0F); MeterHot = Hex(0xC29C00); MeterClip = Hex(0xC42B1C); Hold = Hex(0x404040); Shadow = Hex(0xFFFFFF);
             }
-
-            string ui = FontExists("Segoe UI Variable Text") ? "Segoe UI Variable Text" : "Segoe UI";
-            string ic = FontExists("Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";
-            NameFont = new Font(ui, 9.75f);
-            GlyphFont = new Font(ic, 13f);
-            SmallGlyph = new Font(ic, 7f);
-            GearFont = new Font(ic, 10f);
+            WindowsAccent = Dark ? accForDark : accForLight;
+            Color custom;
+            Accent = !useWindows && TryParseColor(Config.Get("accent"), out custom) ? custom : WindowsAccent;
         }
 
-        static Color Hex(int rgb) { return Color.FromArgb((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF); }
+        public static Color Hex(int rgb) { return Color.FromArgb((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF); }
+
+        public static string ToHex(Color c) { return "#" + c.R.ToString("X2") + c.G.ToString("X2") + c.B.ToString("X2"); }
+
+        public static bool TryParseColor(string text, out Color c)
+        {
+            c = Color.Empty;
+            if (string.IsNullOrEmpty(text)) return false;
+            string t = text.Trim().TrimStart('#');
+            int v;
+            if (t.Length != 6 || !int.TryParse(t, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out v)) return false;
+            c = Hex(v);
+            return true;
+        }
 
         static bool FontExists(string name)
         {
@@ -484,6 +540,37 @@ namespace Jackamixer
         }
     }
 
+    // Look and Effects options, re-read each time the mixer opens.
+    class Style
+    {
+        public static Style Current = new Style();
+        public bool TextShadow, Gradient, Animate, IconGlow, Stereo, Compact, Frosted;
+        public float IconIdle = 0.55f; // resting opacity: icon of an app that isn't playing (glow on)
+        public float IconLit = 1f;     // light-up opacity: icon of an app that is playing (glow on)
+        public float TextIdle = 1f, TextLit = 1f; // same pair for the app's name and percent
+        public float BarAlpha = 1f;    // opacity of the slider tracks and level meters
+        public bool KnobFade = true;   // the slider knobs follow BarAlpha too (off = knobs stay solid)
+
+        public static Style Load()
+        {
+            return new Style
+            {
+                TextShadow = Config.GetBool("text_shadow"),
+                Gradient = Config.GetBool("gradient_meters"),
+                Animate = Config.GetBool("animate"),
+                IconGlow = Config.GetBool("icon_glow"),
+                Stereo = Config.GetBool("stereo_meters"),
+                Compact = Config.GetBool("compact"),
+                Frosted = Config.GetBool("frosted"),
+                IconIdle = Config.GetInt("icon_idle", 10, 100) / 100f,
+                IconLit = Config.GetInt("icon_lit", 10, 100) / 100f,
+                TextIdle = Config.GetInt("text_idle", 10, 100) / 100f,
+                TextLit = Config.GetInt("text_lit", 10, 100) / 100f,
+                BarAlpha = Config.GetInt("bar_opacity", 10, 100) / 100f,
+                KnobFade = Config.GetBool("knob_fade")
+            };
+        }
+    }
 
     // ---------------- Settings ----------------
 
@@ -491,7 +578,8 @@ namespace Jackamixer
     static class Config
     {
         public const string DefaultHotkey = @"Win+\";
-        static readonly string[] Order = { "hotkey", "background", "background_dim", "background_zoom", "background_x", "background_y", "show_gear", "right_click_options", "hidden_apps", "hotkey_mode" };
+        static readonly string[] Order = { "hotkey", "background", "background_dim", "background_zoom", "background_x", "background_y", "show_gear", "right_click_options", "hidden_apps", "hotkey_mode",
+            "use_windows_colors", "accent", "theme", "text_shadow", "gradient_meters", "animate", "icon_glow", "stereo_meters", "compact", "frosted", "icon_idle", "icon_lit", "text_idle", "text_lit", "bar_opacity", "knob_fade" };
 
         static string FilePath
         {
@@ -510,6 +598,22 @@ namespace Jackamixer
                 case "show_gear": return "0";
                 case "right_click_options": return "1";
                 case "hotkey_mode": return "close";
+                case "use_windows_colors": return "1";
+                case "accent": return "#FF8AD8";
+                case "theme": return "dark";
+                case "text_shadow": return "1";
+                case "gradient_meters": return "1";
+                case "animate": return "1";
+                case "icon_glow": return "1";
+                case "stereo_meters": return "0";
+                case "compact": return "0";
+                case "frosted": return "0";
+                case "icon_idle": return "55";
+                case "icon_lit": return "100";
+                case "text_idle": return "100";
+                case "text_lit": return "100";
+                case "knob_fade": return "1";
+                case "bar_opacity": return "100";
             }
             return "";
         }
@@ -549,6 +653,14 @@ namespace Jackamixer
             sb.Append("; right_click_options  1 = right-clicking the mixer opens these options.\r\n");
             sb.Append("; hidden_apps          apps left out of the mixer, by exe name, separated by ;  e.g. icue.exe;steamwebhelper.exe\r\n");
             sb.Append("; hotkey_mode          close = hotkey opens the mixer, clicking away closes it. toggle = hotkey opens and closes it.\r\n");
+            sb.Append("; use_windows_colors   1 = follow the Windows accent and light/dark mode. 0 = use accent and theme below.\r\n");
+            sb.Append("; accent / theme       your own accent color (#RRGGBB) and dark or light.\r\n");
+            sb.Append("; text_shadow, gradient_meters, animate, icon_glow, stereo_meters, compact, frosted   1 = on, 0 = off.\r\n");
+            sb.Append("; icon_idle            10 to 100, resting opacity: icons of apps that aren't playing (icon_glow on).\r\n");
+            sb.Append("; icon_lit             10 to 100, light-up opacity: icons of apps that are playing (icon_glow on).\r\n");
+            sb.Append("; text_idle / text_lit the same two, for the app names and percentages.\r\n");
+            sb.Append("; bar_opacity          10 to 100, opacity of the slider tracks and level meters.\r\n");
+            sb.Append("; knob_fade            1 = the slider knobs follow bar_opacity too, 0 = knobs stay solid.\r\n");
             foreach (string k in Order)
             {
                 string v;
@@ -764,13 +876,86 @@ namespace Jackamixer
             using (var b = new SolidBrush(Color.FromArgb((int)(c.Dim * 2.55f), Theme.Bg))) g.FillRectangle(b, 0, 0, size.Width, size.Height);
         }
 
-        public static void Build(Size size)
+        public static bool Active { get { return frame != null; } }
+
+        // bounds = where the mixer sits on screen (frosted glass needs the position, a picture only the size).
+        public static void Build(Rectangle bounds)
         {
             Release();
+            Size size = bounds.Size;
+            if (size.Width <= 0 || size.Height <= 0) return;
             Bitmap src = Source(Config.Get("background"));
-            if (src == null || size.Width <= 0 || size.Height <= 0) return;
-            frame = new Bitmap(size.Width, size.Height);
-            using (var g = Graphics.FromImage(frame)) Compose(g, size, src, Crop.FromConfig());
+            if (src != null)
+            {
+                frame = new Bitmap(size.Width, size.Height);
+                using (var g = Graphics.FromImage(frame)) Compose(g, size, src, Crop.FromConfig());
+                return;
+            }
+            if (Style.Current.Frosted) frame = Frosted(bounds);
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool SystemParametersInfo(int action, int param, StringBuilder buf, int winIni);
+
+        static Bitmap wallSmall;
+        static string wallKey;
+
+        // Windows 11 "Mica" style: the part of the wallpaper behind the mixer, blurred and tinted.
+        static Bitmap Frosted(Rectangle bounds)
+        {
+            try
+            {
+                var sb = new StringBuilder(520);
+                if (!SystemParametersInfo(0x73, sb.Capacity, sb, 0)) return null; // SPI_GETDESKWALLPAPER
+                string path = sb.ToString();
+                if (path.Length == 0 || !File.Exists(path)) return null;
+                Rectangle scr = Screen.FromRectangle(bounds).Bounds;
+
+                // Small copy of the wallpaper as it fills this monitor, cached until the wallpaper or monitor changes.
+                const int Shrink = 8;
+                string key = path + "|" + File.GetLastWriteTimeUtc(path).Ticks + "|" + scr;
+                if (key != wallKey || wallSmall == null)
+                {
+                    if (wallSmall != null) wallSmall.Dispose();
+                    wallSmall = null;
+                    using (var wall = Image.FromFile(path))
+                    {
+                        var small = new Bitmap(Math.Max(1, scr.Width / Shrink), Math.Max(1, scr.Height / Shrink));
+                        using (var g = Graphics.FromImage(small))
+                        {
+                            g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                            float k = Math.Max(small.Width / (float)wall.Width, small.Height / (float)wall.Height); // "Fill"
+                            float w = wall.Width * k, h = wall.Height * k;
+                            g.DrawImage(wall, (small.Width - w) / 2f, (small.Height - h) / 2f, w, h);
+                        }
+                        wallSmall = small;
+                        wallKey = key;
+                    }
+                }
+
+                // Cut out the mixer's area, shrink it further, then stretch it back up: a cheap, smooth blur.
+                var area = new RectangleF((bounds.X - scr.X) / (float)Shrink, (bounds.Y - scr.Y) / (float)Shrink, bounds.Width / (float)Shrink, bounds.Height / (float)Shrink);
+                int tw = Math.Max(2, bounds.Width / 24), th = Math.Max(2, bounds.Height / 24);
+                using (var tiny = new Bitmap(tw, th))
+                using (var wrap = new ImageAttributes())
+                {
+                    wrap.SetWrapMode(WrapMode.TileFlipXY);
+                    using (var g = Graphics.FromImage(tiny))
+                    {
+                        g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                        g.DrawImage(wallSmall, new Rectangle(0, 0, tw, th), area.X, area.Y, area.Width, area.Height, GraphicsUnit.Pixel, wrap);
+                    }
+                    var frosted = new Bitmap(bounds.Width, bounds.Height);
+                    using (var g = Graphics.FromImage(frosted))
+                    {
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode = PixelOffsetMode.Half;
+                        g.DrawImage(tiny, new Rectangle(0, 0, bounds.Width, bounds.Height), 0, 0, tw, th, GraphicsUnit.Pixel, wrap);
+                        using (var b = new SolidBrush(Color.FromArgb(Theme.Dark ? 175 : 160, Theme.Bg))) g.FillRectangle(b, 0, 0, bounds.Width, bounds.Height);
+                    }
+                    return frosted;
+                }
+            }
+            catch { return null; }
         }
 
         public static void Release()
@@ -805,8 +990,40 @@ namespace Jackamixer
         }
         protected int P(float v) { return (int)Math.Round(v * s); }
 
+        // Text with an optional 1px shadow so it stays readable on pictures and frosted glass.
+        protected void DrawLabel(Graphics g, string text, Font f, Rectangle r, Color c, TextFormatFlags flags)
+        {
+            if (Backdrop.Active && Style.Current.TextShadow)
+            {
+                Rectangle sr = r;
+                int o = Math.Max(1, P(1));
+                sr.Offset(o, o);
+                TextRenderer.DrawText(g, text, f, sr, Theme.Shadow, flags);
+            }
+            TextRenderer.DrawText(g, text, f, r, c, flags);
+        }
+
+        // Pill shape: rounded ends with diameter h.
+        protected static void FillRound(Graphics g, Brush b, float x, float y, float w, float h)
+        {
+            if (w < h) w = h;
+            using (var p = new GraphicsPath())
+            {
+                p.AddArc(x, y, h, h, 90, 180);
+                p.AddArc(x + w - h, y, h, h, 270, 180);
+                p.CloseFigure();
+                g.FillPath(b, p);
+            }
+        }
+
         // Same slider look everywhere: rounded track, accent fill, ringed thumb.
         protected void DrawSlider(Graphics g, int x0, int x1, int y, float frac, Color fill, bool big)
+        {
+            DrawTrack(g, x0, x1, y, frac, fill);
+            DrawThumb(g, x0, x1, y, frac, fill, big);
+        }
+
+        protected void DrawTrack(Graphics g, int x0, int x1, int y, float frac, Color fill)
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             int tx = x0 + (int)Math.Round((x1 - x0) * Util.Clamp01(frac));
@@ -823,6 +1040,12 @@ namespace Jackamixer
                     g.DrawLine(p, x0, y, tx, y);
                 }
             }
+        }
+
+        protected void DrawThumb(Graphics g, int x0, int x1, int y, float frac, Color fill, bool big)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            int tx = x0 + (int)Math.Round((x1 - x0) * Util.Clamp01(frac));
             int ro = P(9), ri = big ? P(6) : P(5);
             using (var b = new SolidBrush(Theme.Thumb)) g.FillEllipse(b, tx - ro, y - ro, ro * 2, ro * 2);
             using (var p = new Pen(Theme.ThumbEdge, 1f)) g.DrawEllipse(p, tx - ro, y - ro, ro * 2, ro * 2);
@@ -836,9 +1059,10 @@ namespace Jackamixer
         public event EventHandler OptionsClicked;
         readonly bool gear;
         bool hover, dragging, gearHover;
-        float vol, shown, hold;
+        float vol;
         bool muted;
-        int holdTicks;
+        readonly float[] shown = new float[2], hold = new float[2]; // left, right (mono uses [0])
+        readonly int[] holdTicks = new int[2];
 
         public ChannelRow(Channel ch, float scale, bool showGear) : base(scale)
         {
@@ -849,10 +1073,25 @@ namespace Jackamixer
             muted = ch.Muted;
         }
 
+        static bool Compact { get { return Style.Current.Compact; } }
+        public static int HeightFor(float s) { return (int)Math.Round((Compact ? 46 : 58) * s); }
+
         int X0 { get { return P(52); } }
         int X1 { get { return Width - P(18); } }
-        Rectangle IconRect { get { return new Rectangle(P(14), (Height - P(26)) / 2, P(26), P(26)); } }
-        Rectangle GearRect { get { return gear ? new Rectangle(X1 - P(16), P(6), P(24), P(24)) : Rectangle.Empty; } }
+        int NameY { get { return P(Compact ? 3 : 8); } }
+        int SliderY { get { return P(Compact ? 26 : 34); } }
+        int MeterY { get { return P(Compact ? 36 : 45); } }
+
+        Rectangle IconRect
+        {
+            get
+            {
+                int size = P(Compact ? 22 : 26);
+                return new Rectangle(P(14) + (P(26) - size) / 2, (Height - size) / 2, size, size);
+            }
+        }
+
+        Rectangle GearRect { get { return gear ? new Rectangle(X1 - P(16), NameY - P(2), P(24), P(24)) : Rectangle.Empty; } }
 
         // -60 dB .. 0 dB mapped onto the bar, so quiet audio still shows.
         static float MeterPos(float p)
@@ -865,16 +1104,32 @@ namespace Jackamixer
         {
             float v = Ch.Volume;
             bool m = Ch.Muted;
-            float target = m ? 0f : MeterPos(Ch.Peak);
-            float ns = target >= shown ? target : Math.Max(target, shown - 0.035f);
-            float nh = hold;
-            int nht = holdTicks;
+            float l = 0f, r = 0f;
+            if (!m)
+            {
+                if (Style.Current.Stereo) Ch.StereoPeak(out l, out r);
+                else l = r = Ch.Peak;
+            }
+            bool changed = Math.Abs(v - vol) > 0.0005f || m != muted;
+            changed |= StepMeter(0, MeterPos(l));
+            changed |= StepMeter(1, MeterPos(r));
+            vol = v;
+            muted = m;
+            if (changed) Invalidate();
+        }
+
+        // Fast rise, slow fall, plus a peak tick that holds for a moment.
+        bool StepMeter(int i, float target)
+        {
+            float ns = target >= shown[i] ? target : Math.Max(target, shown[i] - 0.035f);
+            float nh = hold[i];
+            int nht = holdTicks[i];
             if (target >= nh) { nh = target; nht = 24; }
             else if (nht > 0) nht--;
             else nh = Math.Max(target, nh - 0.02f);
-            bool changed = Math.Abs(v - vol) > 0.0005f || m != muted || Math.Abs(ns - shown) > 0.001f || Math.Abs(nh - hold) > 0.001f;
-            vol = v; muted = m; shown = ns; hold = nh; holdTicks = nht;
-            if (changed) Invalidate();
+            bool changed = Math.Abs(ns - shown[i]) > 0.001f || Math.Abs(nh - hold[i]) > 0.001f;
+            shown[i] = ns; hold[i] = nh; holdTicks[i] = nht;
+            return changed;
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -883,27 +1138,24 @@ namespace Jackamixer
             Backdrop.Paint(g, this, hover);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            var center = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
 
             // icon
             Rectangle ir = IconRect;
-            var center = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
             if (Ch.IsMaster)
             {
-                TextRenderer.DrawText(g, muted ? "" : "", Theme.GlyphFont, ir, muted ? Theme.SubText : Theme.Text, center);
+                DrawLabel(g, muted ? "" : "", Theme.GlyphFont, ir, muted ? Theme.SubText : Theme.Text, center);
             }
             else if (Ch.Icon != null)
             {
-                if (muted)
+                float alpha = muted ? 0.35f : 1f;
+                if (!muted && Style.Current.IconGlow)
                 {
-                    using (var ia = new ImageAttributes())
-                    {
-                        var cm = new ColorMatrix();
-                        cm.Matrix33 = 0.35f;
-                        ia.SetColorMatrix(cm);
-                        g.DrawImage(Ch.Icon, ir, 0, 0, Ch.Icon.Width, Ch.Icon.Height, GraphicsUnit.Pixel, ia);
-                    }
+                    // fades between the resting and light-up opacity with how loud the app is
+                    float rest = Style.Current.IconIdle, lit = Style.Current.IconLit;
+                    alpha = rest + (lit - rest) * Util.Clamp01(Math.Max(shown[0], shown[1]) * 1.8f);
                 }
-                else g.DrawImage(Ch.Icon, ir);
+                DrawIcon(g, Ch.Icon, ir, alpha);
             }
             else
             {
@@ -920,39 +1172,154 @@ namespace Jackamixer
 
             int x0 = X0, x1 = X1;
 
-            // gear (master row only), name, percent
+            // gear (optional, master row only), name, percent
             int textRight = x1;
             if (gear)
             {
-                Rectangle gr = GearRect;
-                TextRenderer.DrawText(g, "", Theme.GearFont, gr, gearHover ? Theme.Text : Theme.SubText, center);
-                textRight = gr.Left - P(6);
+                DrawLabel(g, "", Theme.GearFont, GearRect, gearHover ? Theme.Text : Theme.SubText, center);
+                textRight = GearRect.Left - P(6);
             }
             var left = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
             var right = TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
-            TextRenderer.DrawText(g, Ch.Name, Theme.NameFont, new Rectangle(x0 - P(1), P(8), textRight - x0 - P(52), P(20)), muted ? Theme.SubText : Theme.Text, left);
-            string pct = muted ? "Muted" : ((int)Math.Round(vol * 100)).ToString();
-            TextRenderer.DrawText(g, pct, Theme.NameFont, new Rectangle(textRight - P(56), P(8), P(58), P(20)), Theme.SubText, right);
 
-            // volume slider
-            DrawSlider(g, x0, x1, P(34), vol, muted ? Theme.SubText : Theme.Accent, hover || dragging);
-
-            // level meter
-            g.SmoothingMode = SmoothingMode.None;
-            int my = P(47), mh = Math.Max(3, P(4)), mw = x1 - x0;
-            using (var b = new SolidBrush(Theme.Track)) g.FillRectangle(b, x0, my, mw, mh);
-            int fill = (int)(mw * shown);
-            int hot = (int)(mw * 0.9f), clip = (int)(mw * 0.983f); // -6 dB, -1 dB
-            if (fill > 0)
+            // Name and percent fade between the resting and light-up opacity too. Windows text drawing
+            // has no transparency, so the text goes onto a copy of the background that is blended in.
+            float textAlpha = 1f;
+            if (!Ch.IsMaster && Style.Current.IconGlow)
             {
-                using (var b = new SolidBrush(Theme.Meter)) g.FillRectangle(b, x0, my, Math.Min(fill, hot), mh);
-                if (fill > hot) using (var b = new SolidBrush(Theme.MeterHot)) g.FillRectangle(b, x0 + hot, my, Math.Min(fill, clip) - hot, mh);
-                if (fill > clip) using (var b = new SolidBrush(Theme.MeterClip)) g.FillRectangle(b, x0 + clip, my, fill - clip, mh);
+                float rest = Style.Current.TextIdle, lit = Style.Current.TextLit;
+                textAlpha = rest + (lit - rest) * Util.Clamp01(Math.Max(shown[0], shown[1]) * 1.8f);
             }
-            if (hold > 0.01f)
+            Graphics tg = g;
+            if (textAlpha < 0.999f)
             {
-                int hx = x0 + (int)(mw * hold);
-                using (var b = new SolidBrush(Theme.Hold)) g.FillRectangle(b, Math.Min(hx, x1 - P(2)), my, Math.Max(2, P(2)), mh);
+                if (textLayer == null || textLayer.Width != Width || textLayer.Height != Height)
+                {
+                    if (textLayer != null) textLayer.Dispose();
+                    textLayer = new Bitmap(Math.Max(1, Width), Math.Max(1, Height), PixelFormat.Format32bppRgb);
+                }
+                tg = Graphics.FromImage(textLayer);
+                Backdrop.Paint(tg, this, hover);
+            }
+            DrawLabel(tg, Ch.Name, Theme.NameFont, new Rectangle(x0 - P(1), NameY, textRight - x0 - P(52), P(20)), muted ? Theme.SubText : Theme.Text, left);
+            string pct = muted ? "Muted" : ((int)Math.Round(vol * 100)).ToString();
+            DrawLabel(tg, pct, Theme.NameFont, new Rectangle(textRight - P(56), NameY, P(58), P(20)), Theme.SubText, right);
+            if (tg != g)
+            {
+                tg.Dispose();
+                var area = Rectangle.FromLTRB(x0 - P(2), Math.Max(0, NameY - P(1)), Math.Min(Width, x1 + P(4)), Math.Min(Height, NameY + P(23)));
+                using (var ia = new ImageAttributes())
+                {
+                    var cm = new ColorMatrix();
+                    cm.Matrix33 = textAlpha;
+                    ia.SetColorMatrix(cm);
+                    g.DrawImage(textLayer, area, area.X, area.Y, area.Width, area.Height, GraphicsUnit.Pixel, ia);
+                }
+            }
+
+            // Slider track and level meter(s). With bar opacity below 100% they are drawn on their own
+            // layer first and blended in, so overlapping parts don't double up. The knob goes on that
+            // layer too unless "knobs follow bar opacity" is off.
+            Color fill = muted ? Theme.SubText : Theme.Accent;
+            float barAlpha = Style.Current.BarAlpha;
+            Graphics bars = g;
+            if (barAlpha < 0.999f)
+            {
+                if (barLayer == null || barLayer.Width != Width || barLayer.Height != Height)
+                {
+                    if (barLayer != null) barLayer.Dispose();
+                    barLayer = new Bitmap(Math.Max(1, Width), Math.Max(1, Height), PixelFormat.Format32bppPArgb);
+                }
+                bars = Graphics.FromImage(barLayer);
+                bars.Clear(Color.Transparent);
+            }
+            DrawTrack(bars, x0, x1, SliderY, vol, fill);
+            if (Style.Current.Stereo)
+            {
+                int bh = Math.Max(2, P(3)), gap = Math.Max(1, P(1));
+                DrawMeter(bars, x0, x1, MeterY, bh, shown[0], hold[0]);
+                DrawMeter(bars, x0, x1, MeterY + bh + gap, bh, shown[1], hold[1]);
+            }
+            else DrawMeter(bars, x0, x1, MeterY + P(1), Math.Max(3, P(4)), shown[0], hold[0]);
+            bool knobOnLayer = bars != g && Style.Current.KnobFade;
+            if (knobOnLayer) DrawThumb(bars, x0, x1, SliderY, vol, fill, hover || dragging);
+            if (bars != g)
+            {
+                bars.Dispose();
+                using (var ia = new ImageAttributes())
+                {
+                    var cm = new ColorMatrix();
+                    cm.Matrix33 = barAlpha;
+                    ia.SetColorMatrix(cm);
+                    g.DrawImage(barLayer, new Rectangle(0, 0, Width, Height), 0, 0, Width, Height, GraphicsUnit.Pixel, ia);
+                }
+            }
+            if (!knobOnLayer) DrawThumb(g, x0, x1, SliderY, vol, fill, hover || dragging);
+        }
+
+        Bitmap barLayer, textLayer;
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (barLayer != null) { barLayer.Dispose(); barLayer = null; }
+                if (textLayer != null) { textLayer.Dispose(); textLayer = null; }
+            }
+            base.Dispose(disposing);
+        }
+
+        static void DrawIcon(Graphics g, Bitmap icon, Rectangle r, float alpha)
+        {
+            if (alpha >= 0.999f) { g.DrawImage(icon, r); return; }
+            using (var ia = new ImageAttributes())
+            {
+                var cm = new ColorMatrix();
+                cm.Matrix33 = alpha;
+                ia.SetColorMatrix(cm);
+                g.DrawImage(icon, r, 0, 0, icon.Width, icon.Height, GraphicsUnit.Pixel, ia);
+            }
+        }
+
+        void DrawMeter(Graphics g, int x0, int x1, int y, int h, float level, float peak)
+        {
+            int mw = x1 - x0;
+            int fill = (int)(mw * level);
+            if (Style.Current.Gradient)
+            {
+                // one smooth green -> yellow -> red run with rounded ends
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using (var b = new SolidBrush(Theme.Track)) FillRound(g, b, x0, y, mw, h);
+                if (fill > 0)
+                {
+                    using (var lg = new LinearGradientBrush(new RectangleF(x0 - 1, y, mw + 2, h), Theme.Meter, Theme.MeterClip, LinearGradientMode.Horizontal))
+                    {
+                        var blend = new ColorBlend();
+                        blend.Colors = new[] { Theme.Meter, Theme.Meter, Theme.MeterHot, Theme.MeterClip };
+                        blend.Positions = new[] { 0f, 0.72f, 0.9f, 1f };
+                        lg.InterpolationColors = blend;
+                        FillRound(g, lg, x0, y, Math.Max(fill, h), h);
+                    }
+                }
+            }
+            else
+            {
+                // classic: three flat blocks at -6 dB and -1 dB
+                g.SmoothingMode = SmoothingMode.None;
+                using (var b = new SolidBrush(Theme.Track)) g.FillRectangle(b, x0, y, mw, h);
+                int hot = (int)(mw * 0.9f), clip = (int)(mw * 0.983f);
+                if (fill > 0)
+                {
+                    using (var b = new SolidBrush(Theme.Meter)) g.FillRectangle(b, x0, y, Math.Min(fill, hot), h);
+                    if (fill > hot) using (var b = new SolidBrush(Theme.MeterHot)) g.FillRectangle(b, x0 + hot, y, Math.Min(fill, clip) - hot, h);
+                    if (fill > clip) using (var b = new SolidBrush(Theme.MeterClip)) g.FillRectangle(b, x0 + clip, y, fill - clip, h);
+                }
+            }
+            if (peak > 0.01f)
+            {
+                g.SmoothingMode = SmoothingMode.None;
+                int hx = x0 + (int)(mw * peak);
+                using (var b = new SolidBrush(Theme.Hold)) g.FillRectangle(b, Math.Min(hx, x1 - P(2)), y, Math.Max(2, P(2)), h);
             }
         }
 
@@ -969,7 +1336,7 @@ namespace Jackamixer
                 return;
             }
             if (e.Button == MouseButtons.Middle || (e.Button == MouseButtons.Left && IconRect.Contains(e.Location))) { ToggleMute(); return; }
-            if (e.Button == MouseButtons.Left && e.X >= X0 - P(12) && e.Y >= P(24)) { dragging = true; SetFromX(e.X); }
+            if (e.Button == MouseButtons.Left && e.X >= X0 - P(12) && e.Y >= SliderY - P(10)) { dragging = true; SetFromX(e.X); }
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
@@ -1020,7 +1387,7 @@ namespace Jackamixer
         protected override void OnPaint(PaintEventArgs e)
         {
             Backdrop.Paint(e.Graphics, this, false);
-            TextRenderer.DrawText(e.Graphics, Text, Theme.NameFont, ClientRectangle, Theme.SubText,
+            DrawLabel(e.Graphics, Text, Theme.NameFont, ClientRectangle, Theme.SubText,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
     }
@@ -1199,24 +1566,97 @@ namespace Jackamixer
         }
     }
 
+    // Round color button for the Look tab.
+    class Swatch : PaintedControl
+    {
+        public readonly Color Color;
+        public bool Selected;
+        bool hover;
+
+        public Swatch(float scale, Color color) : base(scale)
+        {
+            Color = color;
+            Size = new Size(P(30), P(30));
+            Cursor = Cursors.Hand;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(Theme.Bg);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            if (Selected || hover)
+            {
+                using (var p = new Pen(Selected ? Theme.Text : Theme.SubText, Math.Max(1.5f, 2 * s)))
+                    g.DrawEllipse(p, P(1), P(1), Width - P(3), Height - P(3));
+            }
+            int inset = P(5);
+            Color c = Enabled ? Color : Color.FromArgb(70, Color);
+            using (var b = new SolidBrush(c)) g.FillEllipse(b, inset, inset, Width - inset * 2 - 1, Height - inset * 2 - 1);
+        }
+
+        protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+    }
+
+    // Tab button on the left side of the options window.
+    class NavItem : PaintedControl
+    {
+        public bool Selected;
+        bool hover;
+
+        public NavItem(float scale, string text) : base(scale)
+        {
+            Text = text;
+            Cursor = Cursors.Hand;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(Selected || hover ? Theme.RowHover : Theme.Bg);
+            if (Selected)
+                using (var b = new SolidBrush(Theme.Accent)) g.FillRectangle(b, 0, P(9), Math.Max(2, P(3)), Height - P(18));
+            TextRenderer.DrawText(g, Text, Theme.NameFont, new Rectangle(P(14), 0, Width - P(14), Height), Selected ? Theme.Text : Theme.SubText,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+    }
+
     // ---------------- Options window ----------------
 
     class OptionsDialog : Form
     {
         [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
 
+        static readonly string[] PageNames = { "General", "Background", "Look", "Effects", "Apps" };
+        static readonly int[] Presets = { 0xFF8AD8, 0xB794F6, 0x60CDFF, 0x4FD1C5, 0x6CCB5F, 0xF6D55C, 0xFF9F43, 0xFF6B6B };
+
         readonly Host host;
         readonly float s;
-        readonly Label hotkeyValue, hotkeyStatus;
-        readonly Button changeBtn, removeBtn;
-        readonly CropPreview preview;
-        readonly SimpleSlider dimSlider, zoomSlider;
+        readonly List<NavItem> navs = new List<NavItem>();
+        readonly List<Panel> pages = new List<Panel>();
+        readonly List<Swatch> swatches = new List<Swatch>();
+        readonly List<Control> ownColorControls = new List<Control>();
+        readonly ToolTip tips = new ToolTip();
+        Label hotkeyValue, hotkeyStatus, accentName;
+        Button removeBtn;
+        CropPreview preview;
+        SimpleSlider dimSlider, zoomSlider;
         bool capturing;
-        bool childOpen; // file picker or message box up: don't close on deactivate
+        bool childOpen; // file picker, color picker or message box up: don't close on deactivate
+        public bool ClosedByUser; // Done or Esc, as opposed to clicking somewhere else
+
+        // Every setting change goes through here so the preview mixer redraws.
+        void Changed() { if (host != null) host.SettingsChanged(); }
 
         public OptionsDialog(Host host, Size mixerSize)
         {
             this.host = host;
+            Theme.LoadColors();
             Text = "Jackamixer options";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -1228,114 +1668,274 @@ namespace Jackamixer
             Font = Theme.NameFont;
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
             using (var g = CreateGraphics()) s = g.DpiX / 96f;
-            ClientSize = new Size(P(860), P(540));
+            ClientSize = new Size(P(780), P(500));
 
-            // left: picture preview shaped like the mixer
-            int ph = P(340);
-            int pw = Math.Max(P(160), Math.Min(P(260), (int)(ph * mixerSize.Width / (float)Math.Max(1, mixerSize.Height))));
-            preview = new CropPreview(s) { Bounds = new Rectangle(P(20), P(20), pw, ph) };
-            preview.Source = Backdrop.Source(Config.Get("background"));
-            preview.Crop = Crop.FromConfig();
-            preview.CropChanged += (o, e) => zoomSlider.Value = (int)Math.Round(preview.Crop.Zoom * 100);
-            preview.CropCommitted += (o, e) => preview.Crop.Save();
-            Controls.Add(preview);
-            var hint = MakeLabel("Drag to move, scroll to zoom.", P(20), P(20) + ph + P(8), pw + P(20), Theme.SubText);
-            hint.Height = P(40); // wraps instead of running under the middle column
+            for (int i = 0; i < PageNames.Length; i++)
+            {
+                int index = i;
+                var nav = new NavItem(s, PageNames[i]) { Bounds = new Rectangle(P(12), P(14) + i * P(40), P(150), P(36)) };
+                nav.Click += (o, e) => ShowPage(index);
+                Controls.Add(nav);
+                navs.Add(nav);
+                var page = new Panel { Bounds = new Rectangle(P(196), P(14), ClientSize.Width - P(214), ClientSize.Height - P(76)), BackColor = Theme.Bg, Visible = false };
+                Controls.Add(page);
+                pages.Add(page);
+            }
+            Controls.Add(new Panel { Bounds = new Rectangle(P(176), P(14), 1, ClientSize.Height - P(28)), BackColor = Theme.Line });
 
-            // right: hotkey
-            int x = P(20) + pw + P(30), w = P(280);
-            Controls.Add(MakeLabel("Hotkey", x, P(20), w, Theme.SubText));
-            hotkeyValue = MakeLabel(Config.ReadHotkey(), x, P(42), w, Theme.Text);
-            hotkeyValue.Font = new Font(Theme.NameFont.FontFamily, 14f);
-            hotkeyValue.Height = P(30);
-            changeBtn = MakeButton("Change", new Rectangle(x, P(78), P(110), P(32)));
-            changeBtn.Click += (o, e) => StartCapture();
-            var resetBtn = MakeButton("Use Win+\\", new Rectangle(x + P(120), P(78), P(110), P(32)));
-            resetBtn.Click += (o, e) => Apply(Config.DefaultHotkey);
-            hotkeyStatus = MakeLabel("", x, P(116), w, Theme.SubText);
+            BuildGeneral(pages[0]);
+            BuildBackground(pages[1], mixerSize);
+            BuildLook(pages[2]);
+            BuildEffects(pages[3]);
+            BuildApps(pages[4]);
+
+            var done = MakeButton(this, "Done", new Rectangle(ClientSize.Width - P(130), ClientSize.Height - P(50), P(110), P(32)));
+            done.Click += (o, e) => { ClosedByUser = true; Close(); };
+            ShowPage(0);
+        }
+
+        int P(float v) { return (int)Math.Round(v * s); }
+
+        public void ShowPage(int index)
+        {
+            for (int i = 0; i < pages.Count; i++)
+            {
+                pages[i].Visible = i == index;
+                navs[i].Selected = i == index;
+                navs[i].Invalidate();
+            }
+        }
+
+        // ---- General: hotkey, what the hotkey does, right-click/gear ----
+
+        void BuildGeneral(Panel p)
+        {
+            int w = p.Width;
+            MakeLabel(p, "Hotkey", 0, 0, w, Theme.SubText);
+            hotkeyValue = MakeLabel(p, Config.ReadHotkey(), 0, P(22), w, Theme.Text);
+            hotkeyValue.Font = Theme.TitleFont;
+            hotkeyValue.Height = P(32);
+            MakeButton(p, "Change", new Rectangle(0, P(60), P(110), P(32))).Click += (o, e) => StartCapture();
+            MakeButton(p, "Use Win+\\", new Rectangle(P(120), P(60), P(110), P(32))).Click += (o, e) => Apply(Config.DefaultHotkey);
+            hotkeyStatus = MakeLabel(p, "", 0, P(98), w, Theme.SubText);
             hotkeyStatus.Height = P(40);
 
-            // right: background
-            Controls.Add(MakeLabel("Background picture", x, P(170), w, Theme.SubText));
-            var chooseBtn = MakeButton("Choose...", new Rectangle(x, P(194), P(110), P(32)));
-            chooseBtn.Click += (o, e) => ChoosePicture();
-            removeBtn = MakeButton("Remove", new Rectangle(x + P(120), P(194), P(110), P(32)));
+            MakeLabel(p, "When you press the hotkey", 0, P(150), w, Theme.SubText);
+            MakeRadio(p, "Open the mixer (clicking away closes it)", "hotkey_mode", "close", 0, P(172), w, null);
+            MakeRadio(p, "Toggle the mixer on and off", "hotkey_mode", "toggle", 0, P(198), w, null);
+
+            MakeLabel(p, "On the mixer", 0, P(244), w, Theme.SubText);
+            MakeCheck(p, "Right-click menu (hide app, options)", "right_click_options", 0, P(266), w, null);
+            MakeCheck(p, "Gear button opens options", "show_gear", 0, P(292), w, null);
+        }
+
+        // ---- Background: picture, crop, darkness, frosted glass ----
+
+        void BuildBackground(Panel p, Size mixerSize)
+        {
+            int ph = P(340);
+            int pw = Math.Max(P(160), Math.Min(P(250), (int)(ph * mixerSize.Width / (float)Math.Max(1, mixerSize.Height))));
+            preview = new CropPreview(s) { Bounds = new Rectangle(0, 0, pw, ph) };
+            preview.Source = Backdrop.Source(Config.Get("background"));
+            preview.Crop = Crop.FromConfig();
+            preview.CropChanged += (o, e) =>
+            {
+                zoomSlider.Value = (int)Math.Round(preview.Crop.Zoom * 100);
+                preview.Crop.Save();
+                Changed();
+            };
+            preview.CropCommitted += (o, e) => preview.Crop.Save();
+            p.Controls.Add(preview);
+            MakeLabel(p, "Drag to move, scroll to zoom.", 0, ph + P(8), pw + P(10), Theme.SubText);
+
+            int x = pw + P(30), w = p.Width - x;
+            MakeLabel(p, "Picture", x, 0, w, Theme.SubText);
+            MakeButton(p, "Choose...", new Rectangle(x, P(22), P(110), P(32))).Click += (o, e) => ChoosePicture();
+            removeBtn = MakeButton(p, "Remove", new Rectangle(x + P(120), P(22), P(110), P(32)));
             removeBtn.Click += (o, e) =>
             {
                 Config.Set("background", "");
                 preview.Source = null;
                 preview.Invalidate();
                 UpdateEnabled();
+                Changed();
             };
 
-            Controls.Add(MakeLabel("Darkness", x, P(244), w, Theme.SubText));
-            dimSlider = new SimpleSlider(s) { Min = 0, Max = 90, Bounds = new Rectangle(x - P(10), P(264), w + P(20), P(28)) };
+            MakeLabel(p, "Darkness", x, P(74), w, Theme.SubText);
+            dimSlider = new SimpleSlider(s) { Min = 0, Max = 90, Bounds = new Rectangle(x - P(10), P(94), w + P(10), P(28)) };
             dimSlider.Value = preview.Crop.Dim;
-            dimSlider.ValueChanged += (o, e) => { preview.Crop.Dim = dimSlider.Value; preview.Invalidate(); };
+            dimSlider.ValueChanged += (o, e) => { preview.Crop.Dim = dimSlider.Value; preview.Invalidate(); preview.Crop.Save(); Changed(); };
             dimSlider.Committed += (o, e) => preview.Crop.Save();
-            Controls.Add(dimSlider);
+            p.Controls.Add(dimSlider);
 
-            Controls.Add(MakeLabel("Zoom", x, P(300), w, Theme.SubText));
-            zoomSlider = new SimpleSlider(s) { Min = 100, Max = 500, Bounds = new Rectangle(x - P(10), P(320), w + P(20), P(28)) };
+            MakeLabel(p, "Zoom", x, P(130), w, Theme.SubText);
+            zoomSlider = new SimpleSlider(s) { Min = 100, Max = 500, Bounds = new Rectangle(x - P(10), P(150), w + P(10), P(28)) };
             zoomSlider.Value = (int)Math.Round(preview.Crop.Zoom * 100);
-            zoomSlider.ValueChanged += (o, e) => { preview.Crop.Zoom = zoomSlider.Value / 100f; preview.ClampAndRefresh(); };
+            zoomSlider.ValueChanged += (o, e) => { preview.Crop.Zoom = zoomSlider.Value / 100f; preview.ClampAndRefresh(); preview.Crop.Save(); Changed(); };
             zoomSlider.Committed += (o, e) => preview.Crop.Save();
-            Controls.Add(zoomSlider);
+            p.Controls.Add(zoomSlider);
 
-            // optional extra ways to get here, off by default
-            Controls.Add(MakeLabel("On the mixer", x, P(362), w, Theme.SubText));
-            MakeCheck("Gear button opens options", "show_gear", x, P(384), w);
-            MakeCheck("Right-click menu (hide app, options)", "right_click_options", x, P(410), w);
-
-            Controls.Add(MakeLabel("Mixer behavior", x, P(446), w, Theme.SubText));
-            MakeRadio("Hotkey opens it, clicking away closes it", "close", x, P(468), w);
-            MakeRadio("Hotkey toggles it on and off", "toggle", x, P(494), w);
-
-            // third column: which apps show up in the mixer
-            int ax = ClientSize.Width - P(240), aw = P(220);
-            MakeLabel("Show in the mixer (untick to hide)", ax, P(20), aw + P(10), Theme.SubText);
-            var apps = new CheckedListBox
-            {
-                Bounds = new Rectangle(ax, P(46), aw, P(340)),
-                CheckOnClick = true, BorderStyle = BorderStyle.None, IntegralHeight = false,
-                BackColor = Theme.Bg, ForeColor = Theme.Text, Font = Theme.NameFont
-            };
-            FillApps(apps);
-            apps.ItemCheck += (o, e) =>
-            {
-                var item = (AppItem)apps.Items[e.Index];
-                Config.SetHidden(item.Id, e.NewValue != CheckState.Checked);
-            };
-            Controls.Add(apps);
-
-            var done = MakeButton("Done", new Rectangle(P(20), ClientSize.Height - P(52), P(110), P(32)));
-            done.Click += (o, e) => Close();
+            MakeLabel(p, "Without a picture", x, P(200), w, Theme.SubText);
+            MakeCheck(p, "Frosted glass (blurred wallpaper)", "frosted", x, P(222), w, null);
 
             preview.ClampAndRefresh();
             UpdateEnabled();
         }
 
-        int P(float v) { return (int)Math.Round(v * s); }
+        // ---- Look: colors and bar opacity ----
 
-        Label MakeLabel(string text, int x, int y, int w, Color color)
+        void BuildLook(Panel p)
         {
-            var l = new Label { Text = text, Bounds = new Rectangle(x, y, w, P(22)), ForeColor = color, BackColor = Theme.Bg };
-            Controls.Add(l);
-            return l;
+            int w = p.Width;
+            MakeCheck(p, "Use Windows colors (accent color and light/dark mode)", "use_windows_colors", 0, 0, w, ColorsChanged);
+
+            ownColorControls.Add(MakeLabel(p, "Your colors", 0, P(36), w, Theme.SubText));
+            for (int i = 0; i < Presets.Length; i++)
+            {
+                Color c = Theme.Hex(Presets[i]);
+                var sw = new Swatch(s, c) { Location = new Point(i * P(38), P(58)) };
+                sw.Click += (o, e) => { Config.Set("accent", Theme.ToHex(c)); ColorsChanged(); };
+                tips.SetToolTip(sw, Theme.ToHex(c));
+                p.Controls.Add(sw);
+                swatches.Add(sw);
+                ownColorControls.Add(sw);
+            }
+            var custom = MakeButton(p, "Custom...", new Rectangle(Presets.Length * P(38) + P(4), P(58), P(100), P(30)));
+            custom.Click += (o, e) => PickCustomColor();
+            ownColorControls.Add(custom);
+            accentName = MakeLabel(p, "", 0, P(94), w, Theme.SubText);
+            ownColorControls.Add(MakeRadio(p, "Dark background", "theme", "dark", 0, P(118), P(170), ColorsChanged));
+            ownColorControls.Add(MakeRadio(p, "Light background", "theme", "light", P(180), P(118), P(170), ColorsChanged));
+
+            MakePercentSlider(p, "Bar opacity (slider tracks and meters)", "bar_opacity", 10, 100, 0, P(164), Math.Min(w, P(360)));
+            MakeCheck(p, "Slider knobs follow bar opacity", "knob_fade", 0, P(220), w, null);
+
+            UpdateColorControls();
         }
 
-        Button MakeButton(string text, Rectangle bounds)
+        // ---- Effects: the on/off extras ----
+
+        void BuildEffects(Panel p)
         {
-            var b = new Button { Text = text, Bounds = bounds, FlatStyle = FlatStyle.Flat, BackColor = Theme.RowHover, ForeColor = Theme.Text, TabStop = false };
-            b.FlatAppearance.BorderColor = Theme.Line;
-            Controls.Add(b);
-            return b;
+            int w = p.Width;
+            MakeLabel(p, "Effects", 0, 0, w, Theme.SubText);
+            string[,] checks =
+            {
+                { "Text shadow on pictures", "text_shadow" },
+                { "Smooth gradient meters", "gradient_meters" },
+                { "Open and close animation", "animate" },
+                { "Apps light up when they play sound", "icon_glow" },
+                { "Stereo meters (left and right)", "stereo_meters" },
+                { "Compact rows", "compact" }
+            };
+            var lightUp = new List<SimpleSlider>();
+            for (int i = 0; i < checks.GetLength(0); i++)
+            {
+                string key = checks[i, 1];
+                CheckBox box = null;
+                Action changed = null;
+                if (key == "icon_glow")
+                    changed = () =>
+                    {
+                        foreach (var sl in lightUp) { sl.Enabled = box.Checked; sl.Invalidate(); }
+                        Changed();
+                    };
+                box = MakeCheck(p, checks[i, 0], key, 0, P(22) + i * P(26), w, changed);
+            }
+
+            // How faded quiet apps are and how bright playing ones get, for icons and for names
+            // (only while "Apps light up" is on). Two columns so it stays tidy.
+            int cw = P(250), tx = P(300);
+            MakeLabel(p, "App icons", 0, P(186), cw, Theme.SubText);
+            MakeLabel(p, "App names", tx, P(186), cw, Theme.SubText);
+            lightUp.Add(MakePercentSlider(p, "Resting (not playing)", "icon_idle", 10, 100, 0, P(212), cw));
+            lightUp.Add(MakePercentSlider(p, "Light-up (playing)", "icon_lit", 10, 100, 0, P(268), cw));
+            lightUp.Add(MakePercentSlider(p, "Resting (not playing)", "text_idle", 10, 100, tx, P(212), cw));
+            lightUp.Add(MakePercentSlider(p, "Light-up (playing)", "text_lit", 10, 100, tx, P(268), cw));
+            bool on = Config.GetBool("icon_glow");
+            foreach (var sl in lightUp) sl.Enabled = on;
         }
+
+        // Label with the live value ("Bar opacity: 80%") above a slider bound to one setting.
+        SimpleSlider MakePercentSlider(Control parent, string text, string key, int min, int max, int x, int y, int w)
+        {
+            var label = MakeLabel(parent, "", x, y, w, Theme.SubText);
+            var slider = new SimpleSlider(s) { Min = min, Max = max, Bounds = new Rectangle(x - P(10), y + P(20), w + P(20), P(28)) };
+            slider.Value = Config.GetInt(key, min, max);
+            label.Text = text + ": " + slider.Value + "%";
+            slider.ValueChanged += (o, e) =>
+            {
+                label.Text = text + ": " + slider.Value + "%";
+                Config.Set(key, slider.Value.ToString());
+                Changed();
+            };
+            parent.Controls.Add(slider);
+            return slider;
+        }
+
+        void ColorsChanged()
+        {
+            Theme.LoadColors();
+            UpdateColorControls();
+            Invalidate(true);
+            Changed();
+        }
+
+        void UpdateColorControls()
+        {
+            bool own = !Config.GetBool("use_windows_colors");
+            foreach (var c in ownColorControls) c.Enabled = own;
+            foreach (var sw in swatches)
+            {
+                sw.Selected = own && sw.Color.ToArgb() == Theme.Accent.ToArgb();
+                sw.Invalidate();
+            }
+            accentName.Text = own ? "Accent " + Theme.ToHex(Theme.Accent) : "Following Windows: accent " + Theme.ToHex(Theme.Accent) + (Theme.Dark ? ", dark mode" : ", light mode");
+        }
+
+        void PickCustomColor()
+        {
+            using (var dlg = new ColorDialog())
+            {
+                dlg.FullOpen = true;
+                dlg.Color = Theme.Accent;
+                childOpen = true;
+                DialogResult r = dlg.ShowDialog(this);
+                childOpen = false;
+                if (r != DialogResult.OK) return;
+                Config.Set("accent", Theme.ToHex(dlg.Color));
+                ColorsChanged();
+            }
+        }
+
+        // ---- Apps: show/hide list ----
 
         class AppItem
         {
             public string Id, Name;
             public override string ToString() { return Name; }
+        }
+
+        void BuildApps(Panel p)
+        {
+            MakeLabel(p, "Show in the mixer (untick to hide)", 0, 0, P(320), Theme.SubText);
+            var list = new CheckedListBox
+            {
+                Bounds = new Rectangle(0, P(26), P(300), p.Height - P(30)),
+                CheckOnClick = true, BorderStyle = BorderStyle.None, IntegralHeight = false,
+                BackColor = Theme.Bg, ForeColor = Theme.Text, Font = Theme.NameFont
+            };
+            FillApps(list);
+            list.ItemCheck += (o, e) =>
+            {
+                var item = (AppItem)list.Items[e.Index];
+                Config.SetHidden(item.Id, e.NewValue != CheckState.Checked);
+                Changed();
+            };
+            p.Controls.Add(list);
+            var note = MakeLabel(p, "Apps that only listen to your sound (iCUE lighting, Discord screen share, OBS) bounce along with everything else. " +
+                "Hide them here, or right-click them in the mixer.", P(320), P(26), p.Width - P(320), Theme.SubText);
+            note.Height = P(100);
         }
 
         // Apps that currently have audio sessions, plus hidden ones that aren't running right now.
@@ -1357,26 +1957,56 @@ namespace Jackamixer
                     list.Items.Add(new AppItem { Id = id, Name = id + " (not running)" }, false);
         }
 
-        void MakeRadio(string text, string mode, int x, int y, int w)
+        // ---- small builders ----
+
+        Label MakeLabel(Control parent, string text, int x, int y, int w, Color color)
         {
-            var r = new RadioButton
-            {
-                Text = text, Bounds = new Rectangle(x, y, w, P(24)), Checked = Config.Get("hotkey_mode") == mode,
-                ForeColor = Theme.Text, BackColor = Theme.Bg, FlatStyle = FlatStyle.Flat, TabStop = false
-            };
-            r.CheckedChanged += (o, e) => { if (r.Checked) Config.Set("hotkey_mode", mode); };
-            Controls.Add(r);
+            var l = new Label { Text = text, Bounds = new Rectangle(x, y, w, P(22)), ForeColor = color, BackColor = Theme.Bg };
+            parent.Controls.Add(l);
+            return l;
         }
 
-        void MakeCheck(string text, string key, int x, int y, int w)
+        Button MakeButton(Control parent, string text, Rectangle bounds)
+        {
+            var b = new Button { Text = text, Bounds = bounds, FlatStyle = FlatStyle.Flat, BackColor = Theme.RowHover, ForeColor = Theme.Text, TabStop = false };
+            b.FlatAppearance.BorderColor = Theme.Line;
+            parent.Controls.Add(b);
+            return b;
+        }
+
+        CheckBox MakeCheck(Control parent, string text, string key, int x, int y, int w, Action changed)
         {
             var c = new CheckBox
             {
                 Text = text, Bounds = new Rectangle(x, y, w, P(24)), Checked = Config.GetBool(key),
                 ForeColor = Theme.Text, BackColor = Theme.Bg, FlatStyle = FlatStyle.Flat, TabStop = false
             };
-            c.CheckedChanged += (o, e) => Config.Set(key, c.Checked ? "1" : "0");
-            Controls.Add(c);
+            c.CheckedChanged += (o, e) =>
+            {
+                Config.Set(key, c.Checked ? "1" : "0");
+                if (changed != null) changed();
+                else Changed();
+            };
+            parent.Controls.Add(c);
+            return c;
+        }
+
+        RadioButton MakeRadio(Control parent, string text, string key, string value, int x, int y, int w, Action changed)
+        {
+            var r = new RadioButton
+            {
+                Text = text, Bounds = new Rectangle(x, y, w, P(24)), Checked = Config.Get(key) == value,
+                ForeColor = Theme.Text, BackColor = Theme.Bg, FlatStyle = FlatStyle.Flat, TabStop = false
+            };
+            r.CheckedChanged += (o, e) =>
+            {
+                if (!r.Checked) return;
+                Config.Set(key, value);
+                if (changed != null) changed();
+                else Changed();
+            };
+            parent.Controls.Add(r);
+            return r;
         }
 
         void UpdateEnabled()
@@ -1416,6 +2046,7 @@ namespace Jackamixer
                 preview.Crop.Save();
                 zoomSlider.Value = 100;
                 UpdateEnabled();
+                Changed();
             }
         }
 
@@ -1425,6 +2056,8 @@ namespace Jackamixer
             int dark = Theme.Dark ? 1 : 0;
             Native.DwmSetWindowAttribute(Handle, 20, ref dark, 4);
         }
+
+        // ---- hotkey capture ----
 
         void StartCapture()
         {
@@ -1447,7 +2080,7 @@ namespace Jackamixer
         {
             if (!capturing)
             {
-                if (keyData == Keys.Escape) { Close(); return true; }
+                if (keyData == Keys.Escape) { ClosedByUser = true; Close(); return true; }
                 return base.ProcessCmdKey(ref msg, keyData);
             }
             Keys key = keyData & Keys.KeyCode;
@@ -1495,15 +2128,22 @@ namespace Jackamixer
         }
 
         // Like the mixer: clicking anywhere else closes it (everything is already saved).
+        // Clicking over to the preview mixer is fine.
         protected override void OnDeactivate(EventArgs e)
         {
             base.OnDeactivate(e);
-            if (host != null && !childOpen && !capturing) BeginInvoke((Action)Close);
+            if (host == null) return;
+            BeginInvoke((Action)(() =>
+            {
+                if (IsDisposed || childOpen || capturing || Form.ActiveForm is MixerForm) return;
+                Close();
+            }));
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             if (capturing) StopCapture();
+            tips.Dispose();
             base.OnFormClosed(e);
         }
     }
@@ -1519,18 +2159,22 @@ namespace Jackamixer
         readonly float s;
         readonly bool snapshot;
         readonly Host host;
-        readonly bool showGear, rightClickOptions, closeOnClickAway;
-        readonly HashSet<string> hidden;
+        bool showGear, rightClickOptions, closeOnClickAway;
+        HashSet<string> hidden;
         readonly ContextMenuStrip rowMenu = new ContextMenuStrip();
         Rectangle workArea;
         string signature = "";
         int ticks;
         bool activatedOnce;
 
-        public MixerForm(bool snapshotMode, Host host)
+        public MixerForm(bool snapshotMode, Host host, bool preview = false)
         {
             snapshot = snapshotMode;
+            Preview = preview; // before anything else: the window can get activated while it is being built
             this.host = host;
+            Theme.LoadColors();
+            Style.Current = Style.Load();
+            if (Style.Current.Animate && !snapshot) Opacity = 0; // faded in by OnShown
             showGear = Config.GetBool("show_gear");
             rightClickOptions = Config.GetBool("right_click_options");
             closeOnClickAway = Config.Get("hotkey_mode") != "toggle";
@@ -1556,23 +2200,101 @@ namespace Jackamixer
             RefreshChannels(true);
             timer.Interval = 33;
             timer.Tick += (o, e) => Step();
+            animTimer.Interval = 10;
+            animTimer.Tick += (o, e) => AnimStep();
         }
 
         int P(float v) { return (int)Math.Round(v * s); }
 
+        // ---- open/close animation: short slide + fade, like the Windows flyouts ----
+
+        readonly System.Windows.Forms.Timer animTimer = new System.Windows.Forms.Timer();
+        bool animOpening, closingAnim, closeReady;
+        int animStart, restTop;
+
+        void StartAnim(bool opening)
+        {
+            animOpening = opening;
+            animStart = Environment.TickCount;
+            if (opening)
+            {
+                restTop = Top;
+                Top = restTop + P(14);
+            }
+            animTimer.Start();
+        }
+
+        void AnimStep()
+        {
+            float t = Math.Min(1f, (Environment.TickCount - animStart) / (animOpening ? 160f : 110f));
+            float ease = 1f - (1f - t) * (1f - t) * (1f - t);
+            if (animOpening)
+            {
+                Opacity = ease;
+                Top = restTop + (int)Math.Round(P(14) * (1f - ease));
+            }
+            else
+            {
+                Opacity = 1f - ease;
+                Top = restTop + (int)Math.Round(P(8) * ease);
+            }
+            if (t < 1f) return;
+            animTimer.Stop();
+            if (!animOpening) { closeReady = true; Close(); }
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (Style.Current.Animate && !snapshot && !closeReady && Visible && e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                if (!closingAnim)
+                {
+                    closingAnim = true;
+                    animTimer.Stop();
+                    restTop = Top;
+                    StartAnim(false);
+                }
+                return;
+            }
+            base.OnFormClosing(e);
+        }
+
         void OpenOptions()
         {
-            if (host != null) host.OpenOptions(ClientSize, true);
-            Close();
+            if (host != null) host.OpenOptions(this);
+            else Close();
+        }
+
+        // While the options window is open the mixer stays up as a live preview:
+        // clicking between the two keeps both, clicking anywhere else closes both.
+        public bool Preview;
+
+        // The preview pops up beside the options window without taking focus from it.
+        protected override bool ShowWithoutActivation { get { return Preview; } }
+
+        // Re-read every setting and redraw (called by the options window as things change).
+        public void Reload()
+        {
+            Theme.LoadColors();
+            Style.Current = Style.Load();
+            showGear = Config.GetBool("show_gear");
+            rightClickOptions = Config.GetBool("right_click_options");
+            closeOnClickAway = Config.Get("hotkey_mode") != "toggle";
+            hidden = Config.HiddenApps();
+            BackColor = Theme.Bg;
+            list.BackColor = Theme.Bg;
+            int dark = Theme.Dark ? 1 : 0;
+            Native.DwmSetWindowAttribute(Handle, 20, ref dark, 4);
+            RefreshChannels(true);
         }
 
         // Right-click menu: "Hide <app>" on an app row, "Options..." everywhere. Can be turned off in the options.
         void HookRightClick(Control c)
         {
-            if (!rightClickOptions) return;
             c.MouseUp += (o, e) =>
             {
-                if (e.Button != MouseButtons.Right) return;
+                if (e.Button != MouseButtons.Right || !rightClickOptions) return;
                 var row = c as ChannelRow;
                 ShowMenu(c, row == null ? null : row.Ch as AppChannel, e.Location);
             };
@@ -1608,17 +2330,38 @@ namespace Jackamixer
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
-            Activate();
-            Native.SetForegroundWindow(Handle);
+            if (!Preview) // a preview opened next to the options window shouldn't take focus from it
+            {
+                Activate();
+                Native.SetForegroundWindow(Handle);
+            }
             if (!snapshot) timer.Start();
+            if (Style.Current.Animate && !snapshot) StartAnim(true);
         }
 
-        protected override void OnActivated(EventArgs e) { base.OnActivated(e); activatedOnce = true; }
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+            if (Visible) activatedOnce = true; // activations while it is still being built do not count
+        }
 
         protected override void OnDeactivate(EventArgs e)
         {
             base.OnDeactivate(e);
-            if (activatedOnce && !snapshot && closeOnClickAway) Close();
+            if (snapshot) return;
+            if (Preview)
+            {
+                if (!activatedOnce) return;
+                // wait until focus has landed: moving to the options window is fine, anywhere else ends both
+                BeginInvoke((Action)(() =>
+                {
+                    if (Form.ActiveForm is OptionsDialog || IsDisposed) return;
+                    if (host != null) host.CloseOptions();
+                    Close();
+                }));
+                return;
+            }
+            if (activatedOnce && closeOnClickAway) Close();
         }
 
         protected override void OnKeyDown(KeyEventArgs e)
@@ -1661,10 +2404,10 @@ namespace Jackamixer
 
         void Rebuild(List<AppChannel> apps)
         {
-            int rowH = P(58), sepH = P(9), pad = P(6), emptyH = P(44), w = P(380);
+            int rowH = ChannelRow.HeightFor(s), sepH = P(9), pad = P(6), emptyH = P(44), w = P(380);
             bool hasMaster = engine.Master != null;
             int total = pad * 2 + (hasMaster ? rowH + sepH : 0) + (apps.Count > 0 ? apps.Count * rowH : emptyH);
-            if (workArea.IsEmpty) workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
+            if (workArea.IsEmpty) workArea = AvoidTaskbar(Screen.FromPoint(Cursor.Position).WorkingArea);
             int maxH = (int)(workArea.Height * 0.85);
             int h = Math.Min(total, maxH);
             int rw = w - (total > maxH ? SystemInformation.VerticalScrollBarWidth : 0);
@@ -1687,9 +2430,33 @@ namespace Jackamixer
             foreach (var a in apps) { AddRow(a, y, rw, rowH); y += rowH; }
             list.ResumeLayout();
 
-            Bounds = new Rectangle(workArea.Right - w - P(12), workArea.Bottom - h - P(12), w, h);
-            Backdrop.Build(new Size(w, h));
+            var rest = new Rectangle(workArea.Right - w - P(12), workArea.Bottom - h - P(12), w, h);
+            if (animTimer.Enabled) restTop = rest.Top; // mid-animation: only move where it settles
+            else Bounds = rest;
+            Size = rest.Size;
+            Backdrop.Build(rest);
             Invalidate(true);
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct AppBarData { public int cbSize; public IntPtr hWnd; public uint uCallbackMessage, uEdge; public int left, top, right, bottom; public IntPtr lParam; }
+        [DllImport("shell32.dll")] static extern IntPtr SHAppBarMessage(uint msg, ref AppBarData data);
+
+        // An auto-hide taskbar doesn't reserve screen space, so the work area runs under it. Stay clear of it anyway.
+        static Rectangle AvoidTaskbar(Rectangle area)
+        {
+            var abd = new AppBarData { cbSize = Marshal.SizeOf(typeof(AppBarData)) };
+            if (SHAppBarMessage(5, ref abd) == IntPtr.Zero) return area; // ABM_GETTASKBARPOS
+            var bar = Rectangle.FromLTRB(abd.left, abd.top, abd.right, abd.bottom);
+            if (!bar.IntersectsWith(area)) return area;
+            switch (abd.uEdge)
+            {
+                case 3: return Rectangle.FromLTRB(area.Left, area.Top, area.Right, Math.Min(area.Bottom, bar.Top));    // bottom
+                case 1: return Rectangle.FromLTRB(area.Left, Math.Max(area.Top, bar.Bottom), area.Right, area.Bottom); // top
+                case 2: return Rectangle.FromLTRB(area.Left, area.Top, Math.Min(area.Right, bar.Left), area.Bottom);   // right
+                case 0: return Rectangle.FromLTRB(Math.Max(area.Left, bar.Right), area.Top, area.Right, area.Bottom);  // left
+            }
+            return area;
         }
 
         void AddRow(Channel ch, int y, int w, int h)
@@ -1721,19 +2488,47 @@ namespace Jackamixer
         MixerForm form;
         OptionsDialog options;
         Size lastMixerSize = new Size(380, 540);
-        bool reopenMixer;
+        bool backToMixer;
+        readonly System.Windows.Forms.Timer reloadTimer = new System.Windows.Forms.Timer { Interval = 60 };
 
         public Host()
         {
             CreateHandle(new CreateParams { Caption = Title });
+            reloadTimer.Tick += (o, e) =>
+            {
+                reloadTimer.Stop();
+                if (form != null && !form.IsDisposed) form.Reload();
+            };
         }
 
-        // Shows the options after the flyout has closed. From the mixer itself, the mixer comes back afterwards.
+        // From the mixer: it stays open as the live preview, and Done goes back to it.
+        public void OpenOptions(MixerForm from)
+        {
+            lastMixerSize = from.ClientSize;
+            from.Preview = true;
+            backToMixer = true;
+            Native.PostMessage(Handle, WM_OPTIONS, IntPtr.Zero, IntPtr.Zero);
+        }
+
+        // From the Start menu or the command line.
         public void OpenOptions(Size mixerSize, bool fromMixer)
         {
             lastMixerSize = mixerSize;
-            reopenMixer = fromMixer;
+            backToMixer = fromMixer;
             Native.PostMessage(Handle, WM_OPTIONS, IntPtr.Zero, IntPtr.Zero);
+        }
+
+        // The options window calls this on every change; the preview redraws a moment later
+        // (batched, so dragging a slider doesn't rebuild the mixer on every pixel).
+        public void SettingsChanged()
+        {
+            reloadTimer.Stop();
+            reloadTimer.Start();
+        }
+
+        public void CloseOptions()
+        {
+            if (options != null && !options.IsDisposed) options.Close();
         }
 
         public void PauseHotkey() { Native.UnregisterHotKey(Handle, 1); }
@@ -1762,28 +2557,53 @@ namespace Jackamixer
             return null;
         }
 
+        MixerForm NewMixer(bool preview)
+        {
+            var m = new MixerForm(false, this, preview);
+            m.FormClosed += (o, e) =>
+            {
+                if (form == m) form = null;
+                GC.Collect(); // drop the audio session objects right away
+            };
+            return m;
+        }
+
         public void Toggle()
         {
             if (options != null) { options.Activate(); return; }
             if (form != null && !form.IsDisposed) { form.Close(); return; }
-            form = new MixerForm(false, this);
-            form.FormClosed += (o, e) =>
-            {
-                form = null;
-                GC.Collect(); // drop the audio session objects right away
-            };
+            form = NewMixer(false);
             form.Show();
         }
 
+        // Options window plus the mixer beside it as a live preview.
         void ShowOptions()
         {
             if (options != null) { options.Activate(); return; }
-            using (options = new OptionsDialog(this, lastMixerSize)) options.ShowDialog();
-            options = null;
-            string err = RegisterFromConfig();
-            if (err != null) MessageBox.Show(err, "Jackamixer");
-            if (reopenMixer) Toggle(); // back to the mixer so the changes show
-            reopenMixer = false;
+            if (form == null || form.IsDisposed)
+            {
+                form = NewMixer(true); // opened from the Start menu: bring the mixer up as the preview
+                form.Preview = true;
+                form.Show();
+            }
+            else form.Preview = true;
+
+            options = new OptionsDialog(this, lastMixerSize);
+            options.FormClosed += (o, e) =>
+            {
+                bool done = ((OptionsDialog)o).ClosedByUser;
+                options = null;
+                string err = RegisterFromConfig();
+                if (err != null) MessageBox.Show(err, "Jackamixer");
+                if (form != null && !form.IsDisposed)
+                {
+                    // Done/Esc after coming from the mixer: back to it. Otherwise the preview goes too.
+                    if (done && backToMixer) { form.Preview = false; form.Activate(); }
+                    else form.Close();
+                }
+                backToMixer = false;
+            };
+            options.Show();
         }
 
         protected override void WndProc(ref Message m)
@@ -1793,7 +2613,7 @@ namespace Jackamixer
                 case WM_HOTKEY:
                 case WM_TOGGLE: Toggle(); return;
                 case WM_OPTIONS:
-                    if (m.WParam != IntPtr.Zero) reopenMixer = false; // sent by "Jackamixer.exe --options"
+                    if (m.WParam != IntPtr.Zero) backToMixer = false; // sent by "Jackamixer.exe --options"
                     ShowOptions();
                     return;
                 case WM_RELOAD:
@@ -1822,7 +2642,7 @@ namespace Jackamixer
             Application.SetCompatibleTextRenderingDefault(false);
             Theme.Load();
 
-            if ((first == "--snapshot" || first == "--snapshot-options") && args.Length > 1) { Snapshot(first == "--snapshot-options", args[1]); return; }
+            if ((first == "--snapshot" || first == "--snapshot-options") && args.Length > 1) { Snapshot(first == "--snapshot-options", args[1], args.Length > 2 ? int.Parse(args[2]) : 0); return; }
 
             bool created;
             using (var mutex = new Mutex(true, @"Local\Jackamixer", out created))
@@ -1854,10 +2674,15 @@ namespace Jackamixer
         }
 
         // Renders a window to a PNG without user interaction (for checking the look).
-        static void Snapshot(bool optionsWindow, string file)
+        static void Snapshot(bool optionsWindow, string file, int page)
         {
             Form form;
-            if (optionsWindow) form = new OptionsDialog(null, new Size(380, 540));
+            if (optionsWindow)
+            {
+                var dlg = new OptionsDialog(null, new Size(380, 540));
+                dlg.ShowPage(page);
+                form = dlg;
+            }
             else form = new MixerForm(true, null);
             form.Show();
             var mixer = form as MixerForm;
