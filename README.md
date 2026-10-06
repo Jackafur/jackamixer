@@ -8,6 +8,7 @@ A small volume mixer for Windows 10/11 with live level meters. One row per app: 
 - No tray icon. A hidden listener holds the hotkey (about 24 MB RAM, 0% CPU while idle); the mixer window only exists while it is open.
 - Apps with several processes (browsers, Discord) get one row.
 - Apps light up when they play sound: quiet apps fade back, the one making noise stands out.
+- Shows what's playing (song or video title and artist, from YouTube, Spotify and the like) with previous / play-pause / next.
 - Follows your Windows accent color and light/dark mode, or pick your own colors.
 - Optional background picture (drag to position, zoom, darkness) or frosted glass, see-through bars, stereo meters, compact rows.
 
@@ -43,10 +44,10 @@ While Options is open the mixer stays up next to it and changes as you go, so yo
 
 | Tab | What's there |
 | --- | --- |
-| General | hotkey (press the keys you want), whether the hotkey **opens** the mixer (click away closes it) or **toggles** it, right-click menu, gear button |
+| General | hotkey (press the keys you want), whether the hotkey **opens** the mixer (click away closes it) or **toggles** it, right-click menu, gear button, show what's playing |
 | Background | picture with drag-to-move, zoom and darkness; frosted glass (your blurred wallpaper) when there's no picture |
-| Look | use Windows colors, or your own accent color and dark/light background; bar opacity, and whether the slider knobs fade with it |
-| Effects | text shadow, smooth gradient meters, open/close animation, stereo meters, compact rows, and "apps light up when they play sound" with resting and light-up opacity for icons and names |
+| Look | use Windows colors, or your own accent color and dark/light background; bar opacity (when light-up is off), and whether the slider knobs fade with it |
+| Effects | text shadow, smooth gradient meters, open/close animation, stereo meters, compact rows, and "apps light up when they play sound" with resting and light-up opacity for icons, names and bars |
 | Apps | tick or untick which apps show in the mixer |
 
 Why is iCUE (or Discord, OBS, Wallpaper Engine) bouncing when it isn't making sound? Apps with audio-reactive features listen to your speakers, Windows lists that as a session on your speakers, and its meter shows everything it hears. Hide it if it bugs you.
@@ -65,7 +66,9 @@ accent=#FF8AD8
 icon_glow=1
 icon_idle=55
 icon_lit=100
-bar_opacity=100
+bar_idle=100
+bar_lit=100
+now_playing=1
 hidden_apps=icue.exe
 ```
 
@@ -82,7 +85,7 @@ hidden_apps=icue.exe
 
 ## Building
 
-`build.cmd` compiles `Jackamixer.cs` (the whole app, one file) with `%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`. The icon is `assets\jackamixer.ico`.
+`build.cmd` compiles `Jackamixer.cs` (the whole app, one file) with `%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`. "Now playing" uses Windows' own media API through the metadata files in `%WINDIR%\System32\WinMetadata`, which every Windows 10/11 PC has. The icon is `assets\jackamixer.ico`.
 
 ## License
 

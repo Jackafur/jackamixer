@@ -454,7 +454,7 @@ namespace Jackamixer
     {
         public static bool Dark = true;
         public static Color Bg, RowHover, Text, SubText, Track, Thumb, ThumbEdge, Line, Accent, WindowsAccent, Meter, MeterHot, MeterClip, Hold, Shadow;
-        public static Font NameFont, TitleFont, GlyphFont, SmallGlyph, GearFont;
+        public static Font NameFont, TitleFont, SmallFont, GlyphFont, SmallGlyph, GearFont;
 
         public static void Load()
         {
@@ -463,6 +463,7 @@ namespace Jackamixer
             string ic = FontExists("Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";
             NameFont = new Font(ui, 9.75f);
             TitleFont = new Font(ui, 14f);
+            SmallFont = new Font(ui, 8.25f);
             GlyphFont = new Font(ic, 13f);
             SmallGlyph = new Font(ic, 7f);
             GearFont = new Font(ic, 10f);
@@ -548,6 +549,7 @@ namespace Jackamixer
         public float IconIdle = 0.55f; // resting opacity: icon of an app that isn't playing (glow on)
         public float IconLit = 1f;     // light-up opacity: icon of an app that is playing (glow on)
         public float TextIdle = 1f, TextLit = 1f; // same pair for the app's name and percent
+        public float BarIdle = 1f, BarLit = 1f;   // and for its bars, on top of BarAlpha
         public float BarAlpha = 1f;    // opacity of the slider tracks and level meters
         public bool KnobFade = true;   // the slider knobs follow BarAlpha too (off = knobs stay solid)
 
@@ -566,6 +568,8 @@ namespace Jackamixer
                 IconLit = Config.GetInt("icon_lit", 10, 100) / 100f,
                 TextIdle = Config.GetInt("text_idle", 10, 100) / 100f,
                 TextLit = Config.GetInt("text_lit", 10, 100) / 100f,
+                BarIdle = Config.GetInt("bar_idle", 10, 100) / 100f,
+                BarLit = Config.GetInt("bar_lit", 10, 100) / 100f,
                 BarAlpha = Config.GetInt("bar_opacity", 10, 100) / 100f,
                 KnobFade = Config.GetBool("knob_fade")
             };
@@ -579,7 +583,7 @@ namespace Jackamixer
     {
         public const string DefaultHotkey = @"Win+\";
         static readonly string[] Order = { "hotkey", "background", "background_dim", "background_zoom", "background_x", "background_y", "show_gear", "right_click_options", "hidden_apps", "hotkey_mode",
-            "use_windows_colors", "accent", "theme", "text_shadow", "gradient_meters", "animate", "icon_glow", "stereo_meters", "compact", "frosted", "icon_idle", "icon_lit", "text_idle", "text_lit", "bar_opacity", "knob_fade" };
+            "use_windows_colors", "accent", "theme", "text_shadow", "gradient_meters", "animate", "icon_glow", "stereo_meters", "compact", "frosted", "icon_idle", "icon_lit", "text_idle", "text_lit", "bar_idle", "bar_lit", "bar_opacity", "knob_fade", "now_playing" };
 
         static string FilePath
         {
@@ -612,7 +616,10 @@ namespace Jackamixer
                 case "icon_lit": return "100";
                 case "text_idle": return "100";
                 case "text_lit": return "100";
+                case "bar_idle": return "100";
+                case "bar_lit": return "100";
                 case "knob_fade": return "1";
+                case "now_playing": return "1";
                 case "bar_opacity": return "100";
             }
             return "";
@@ -659,8 +666,10 @@ namespace Jackamixer
             sb.Append("; icon_idle            10 to 100, resting opacity: icons of apps that aren't playing (icon_glow on).\r\n");
             sb.Append("; icon_lit             10 to 100, light-up opacity: icons of apps that are playing (icon_glow on).\r\n");
             sb.Append("; text_idle / text_lit the same two, for the app names and percentages.\r\n");
+            sb.Append("; bar_idle / bar_lit   the same two, for the app's bars (on top of bar_opacity).\r\n");
             sb.Append("; bar_opacity          10 to 100, opacity of the slider tracks and level meters.\r\n");
             sb.Append("; knob_fade            1 = the slider knobs follow bar_opacity too, 0 = knobs stay solid.\r\n");
+            sb.Append("; now_playing          1 = show what's playing (title, artist, play/pause) under Speakers.\r\n");
             foreach (string k in Order)
             {
                 string v;
@@ -1221,7 +1230,14 @@ namespace Jackamixer
             // layer first and blended in, so overlapping parts don't double up. The knob goes on that
             // layer too unless "knobs follow bar opacity" is off.
             Color fill = muted ? Theme.SubText : Theme.Accent;
+            // Bars: with "Apps light up" on they use the Effects resting/light-up opacity (by how loud
+            // this row is, Speakers included); with it off, the Look tab's bar opacity.
             float barAlpha = Style.Current.BarAlpha;
+            if (Style.Current.IconGlow)
+            {
+                float rest = Style.Current.BarIdle, lit = Style.Current.BarLit;
+                barAlpha = rest + (lit - rest) * Util.Clamp01(Math.Max(shown[0], shown[1]) * 1.8f);
+            }
             Graphics bars = g;
             if (barAlpha < 0.999f)
             {
@@ -1727,6 +1743,7 @@ namespace Jackamixer
             MakeLabel(p, "On the mixer", 0, P(244), w, Theme.SubText);
             MakeCheck(p, "Right-click menu (hide app, options)", "right_click_options", 0, P(266), w, null);
             MakeCheck(p, "Gear button opens options", "show_gear", 0, P(292), w, null);
+            MakeCheck(p, "Show what's playing (song or video title, play/pause)", "now_playing", 0, P(318), w, null);
         }
 
         // ---- Background: picture, crop, darkness, frosted glass ----
@@ -1807,8 +1824,11 @@ namespace Jackamixer
             ownColorControls.Add(MakeRadio(p, "Dark background", "theme", "dark", 0, P(118), P(170), ColorsChanged));
             ownColorControls.Add(MakeRadio(p, "Light background", "theme", "light", P(180), P(118), P(170), ColorsChanged));
 
-            MakePercentSlider(p, "Bar opacity (slider tracks and meters)", "bar_opacity", 10, 100, 0, P(164), Math.Min(w, P(360)));
+            barOpacity = MakePercentSlider(p, "Bar opacity (slider tracks and meters)", "bar_opacity", 10, 100, 0, P(164), Math.Min(w, P(360)));
+            barOpacityNote = MakeLabel(p, "Effects > Apps light up sets the bars while it's on.", P(370), P(186), w - P(370), Theme.SubText);
+            barOpacityNote.Height = P(40);
             MakeCheck(p, "Slider knobs follow bar opacity", "knob_fade", 0, P(220), w, null);
+            UpdateBarOpacity(Config.GetBool("icon_glow"));
 
             UpdateColorControls();
         }
@@ -1838,22 +1858,39 @@ namespace Jackamixer
                     changed = () =>
                     {
                         foreach (var sl in lightUp) { sl.Enabled = box.Checked; sl.Invalidate(); }
+                        UpdateBarOpacity(box.Checked);
                         Changed();
                     };
                 box = MakeCheck(p, checks[i, 0], key, 0, P(22) + i * P(26), w, changed);
             }
 
-            // How faded quiet apps are and how bright playing ones get, for icons and for names
-            // (only while "Apps light up" is on). Two columns so it stays tidy.
-            int cw = P(250), tx = P(300);
-            MakeLabel(p, "App icons", 0, P(186), cw, Theme.SubText);
-            MakeLabel(p, "App names", tx, P(186), cw, Theme.SubText);
-            lightUp.Add(MakePercentSlider(p, "Resting (not playing)", "icon_idle", 10, 100, 0, P(212), cw));
-            lightUp.Add(MakePercentSlider(p, "Light-up (playing)", "icon_lit", 10, 100, 0, P(268), cw));
-            lightUp.Add(MakePercentSlider(p, "Resting (not playing)", "text_idle", 10, 100, tx, P(212), cw));
-            lightUp.Add(MakePercentSlider(p, "Light-up (playing)", "text_lit", 10, 100, tx, P(268), cw));
+            // How faded quiet apps are and how bright playing ones get, for icons, names and bars
+            // (only while "Apps light up" is on). Three columns so it stays tidy.
+            MakeLabel(p, "Light-up opacity    Resting = no sound, Light-up = playing sound", 0, P(186), w, Theme.SubText);
+            string[,] cols = { { "Icons", "icon" }, { "Names", "text" }, { "Bars", "bar" } };
+            int cw = P(165), step = P(195);
+            for (int c = 0; c < cols.GetLength(0); c++)
+            {
+                int cx = c * step;
+                MakeLabel(p, cols[c, 0], cx, P(212), cw, Theme.Text);
+                lightUp.Add(MakePercentSlider(p, "Resting", cols[c, 1] + "_idle", 10, 100, cx, P(238), cw));
+                lightUp.Add(MakePercentSlider(p, "Light-up", cols[c, 1] + "_lit", 10, 100, cx, P(294), cw));
+            }
+            MakeLabel(p, "While this is on, the Bars sliders replace the Bar opacity on the Look tab.", 0, P(352), w, Theme.SubText);
             bool on = Config.GetBool("icon_glow");
             foreach (var sl in lightUp) sl.Enabled = on;
+        }
+
+        SimpleSlider barOpacity;
+        Label barOpacityNote;
+
+        // The Look tab's Bar opacity only applies while "Apps light up" is off.
+        void UpdateBarOpacity(bool lightUpOn)
+        {
+            if (barOpacity == null) return;
+            barOpacity.Enabled = !lightUpOn;
+            barOpacity.Invalidate();
+            barOpacityNote.Visible = lightUpOn;
         }
 
         // Label with the live value ("Bar opacity: 80%") above a slider bound to one setting.
@@ -2148,6 +2185,197 @@ namespace Jackamixer
         }
     }
 
+    // ---------------- Now playing ----------------
+
+    // What Windows' media flyout knows: title and artist of the current media session (a browser tab,
+    // Spotify, ...), plus previous / play-pause / next. Polled once a second on its own thread, and
+    // only while the mixer is open.
+    class MediaWatcher
+    {
+        public class Info
+        {
+            public string Title = "", Artist = "";
+            public bool Playing, CanPrev, CanNext;
+        }
+
+        public readonly ManualResetEvent FirstPoll = new ManualResetEvent(false);
+        volatile Info latest;
+        volatile bool stopping;
+        int command; // 1 previous, 2 play/pause, 3 next
+        readonly AutoResetEvent wake = new AutoResetEvent(false);
+        global::Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager manager;
+
+        public Info Latest { get { return latest; } }
+
+        public void Start()
+        {
+            var t = new Thread(Loop) { IsBackground = true, Name = "Jackamixer media" };
+            t.Start();
+        }
+
+        public void Stop() { stopping = true; wake.Set(); }
+
+        public void Send(int cmd)
+        {
+            Interlocked.Exchange(ref command, cmd);
+            wake.Set();
+        }
+
+        void Loop()
+        {
+            while (!stopping)
+            {
+                try { Poll(); }
+                catch { latest = null; manager = null; } // e.g. a Windows without this API: simply no row
+                FirstPoll.Set();
+                wake.WaitOne(1000);
+            }
+        }
+
+        public void Poll()
+        {
+            if (manager == null)
+                manager = Wait(global::Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager.RequestAsync());
+            var session = manager.GetCurrentSession();
+            if (session == null)
+            {
+                foreach (var s in manager.GetSessions())
+                {
+                    if (s.GetPlaybackInfo().PlaybackStatus == global::Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+                    {
+                        session = s;
+                        break;
+                    }
+                }
+            }
+            if (session == null) { latest = null; return; }
+
+            int cmd = Interlocked.Exchange(ref command, 0);
+            if (cmd != 0)
+            {
+                if (cmd == 1) Wait(session.TrySkipPreviousAsync());
+                else if (cmd == 2) Wait(session.TryTogglePlayPauseAsync());
+                else if (cmd == 3) Wait(session.TrySkipNextAsync());
+                Thread.Sleep(250); // let the player catch up before reading it back
+            }
+
+            var props = Wait(session.TryGetMediaPropertiesAsync());
+            var playback = session.GetPlaybackInfo();
+            var info = new Info
+            {
+                Title = props.Title ?? "",
+                Artist = props.Artist ?? "",
+                Playing = playback.PlaybackStatus == global::Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing,
+                CanPrev = playback.Controls.IsPreviousEnabled,
+                CanNext = playback.Controls.IsNextEnabled
+            };
+            latest = info.Title.Length > 0 ? info : null;
+        }
+
+        // Waits for a Windows async call (the SDK-only AsTask() helper isn't available to this compiler).
+        static T Wait<T>(global::Windows.Foundation.IAsyncOperation<T> op)
+        {
+            int start = Environment.TickCount;
+            while (op.Status == global::Windows.Foundation.AsyncStatus.Started)
+            {
+                if (Environment.TickCount - start > 3000) throw new TimeoutException();
+                Thread.Sleep(5);
+            }
+            return op.GetResults();
+        }
+    }
+
+    // "Now playing" strip under the Speakers row: title, artist, previous / play-pause / next.
+    class NowPlayingRow : PaintedControl
+    {
+        static readonly string[] Glyphs = { "", "", "" }; // previous, play, next (pause is E769)
+        readonly MediaWatcher media;
+        MediaWatcher.Info info;
+        int hoverButton = -1;
+
+        public NowPlayingRow(float scale, MediaWatcher media) : base(scale)
+        {
+            this.media = media;
+            info = media.Latest;
+        }
+
+        public static int HeightFor(float s) { return (int)Math.Round((Style.Current.Compact ? 38 : 44) * s); }
+
+        Rectangle ButtonRect(int i)
+        {
+            int size = P(28);
+            return new Rectangle(Width - P(14) - (3 - i) * size, (Height - size) / 2, size, size);
+        }
+
+        bool ButtonOn(int i) { return info != null && (i == 1 || (i == 0 ? info.CanPrev : info.CanNext)); }
+
+        public void Tick()
+        {
+            var now = media.Latest;
+            if (Same(now, info)) return;
+            info = now;
+            Invalidate();
+        }
+
+        static bool Same(MediaWatcher.Info a, MediaWatcher.Info b)
+        {
+            if (a == null || b == null) return a == b;
+            return a.Title == b.Title && a.Artist == b.Artist && a.Playing == b.Playing && a.CanPrev == b.CanPrev && a.CanNext == b.CanNext;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            Backdrop.Paint(g, this, false);
+            if (info == null) return;
+            var center = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
+            var left = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
+
+            DrawLabel(g, "", Theme.GlyphFont, new Rectangle(P(14), (Height - P(26)) / 2, P(26), P(26)), Theme.SubText, center); // music note
+
+            int x0 = P(52), w = ButtonRect(0).Left - P(8) - x0, mid = Height / 2;
+            if (info.Artist.Length > 0)
+            {
+                DrawLabel(g, info.Title, Theme.NameFont, new Rectangle(x0 - P(1), mid - P(19), w, P(19)), Theme.Text, left);
+                DrawLabel(g, info.Artist, Theme.SmallFont, new Rectangle(x0 - P(1), mid, w, P(17)), Theme.SubText, left);
+            }
+            else DrawLabel(g, info.Title, Theme.NameFont, new Rectangle(x0 - P(1), 0, w, Height), Theme.Text, left);
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            for (int i = 0; i < 3; i++)
+            {
+                Rectangle r = ButtonRect(i);
+                bool on = ButtonOn(i);
+                if (on && i == hoverButton)
+                {
+                    using (var b = new SolidBrush(Theme.Dark ? Color.FromArgb(40, Color.White) : Color.FromArgb(30, Color.Black)))
+                        g.FillEllipse(b, r);
+                }
+                string glyph = i == 1 && info.Playing ? "" : Glyphs[i];
+                DrawLabel(g, glyph, Theme.GearFont, r, on ? (i == hoverButton ? Theme.Text : Theme.SubText) : Theme.Track, center);
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int hit = -1;
+            for (int i = 0; i < 3; i++) if (ButtonRect(i).Contains(e.Location)) hit = i;
+            if (hit == hoverButton) return;
+            hoverButton = hit;
+            Cursor = hit >= 0 && ButtonOn(hit) ? Cursors.Hand : Cursors.Default;
+            Invalidate();
+        }
+
+        protected override void OnMouseLeave(EventArgs e) { hoverButton = -1; Invalidate(); base.OnMouseLeave(e); }
+
+        protected override void OnMouseClick(MouseEventArgs e)
+        {
+            base.OnMouseClick(e);
+            if (e.Button == MouseButtons.Left && hoverButton >= 0 && ButtonOn(hoverButton)) media.Send(hoverButton + 1);
+        }
+    }
+
     // ---------------- Flyout ----------------
 
     class MixerForm : Form
@@ -2162,6 +2390,9 @@ namespace Jackamixer
         bool showGear, rightClickOptions, closeOnClickAway;
         HashSet<string> hidden;
         readonly ContextMenuStrip rowMenu = new ContextMenuStrip();
+        MediaWatcher media;   // "now playing", only while that option is on
+        NowPlayingRow nowRow;
+        bool showMedia, mediaShown;
         Rectangle workArea;
         string signature = "";
         int ticks;
@@ -2196,6 +2427,8 @@ namespace Jackamixer
             list.BackColor = Theme.Bg;
             HookRightClick(list);
             Controls.Add(list);
+            showMedia = Config.GetBool("now_playing");
+            if (showMedia) StartMedia();
             engine.Open();
             RefreshChannels(true);
             timer.Interval = 33;
@@ -2282,11 +2515,29 @@ namespace Jackamixer
             rightClickOptions = Config.GetBool("right_click_options");
             closeOnClickAway = Config.Get("hotkey_mode") != "toggle";
             hidden = Config.HiddenApps();
+            showMedia = Config.GetBool("now_playing");
+            if (showMedia) StartMedia(); else StopMedia();
             BackColor = Theme.Bg;
             list.BackColor = Theme.Bg;
             int dark = Theme.Dark ? 1 : 0;
             Native.DwmSetWindowAttribute(Handle, 20, ref dark, 4);
             RefreshChannels(true);
+        }
+
+        void StartMedia()
+        {
+            if (media != null) return;
+            media = new MediaWatcher();
+            if (snapshot) { try { media.Poll(); } catch { } return; } // a render needs it right away
+            media.Start();
+            media.FirstPoll.WaitOne(200); // usually ready by then, so the row is there when the mixer opens
+        }
+
+        void StopMedia()
+        {
+            if (media == null) return;
+            media.Stop();
+            media = null;
         }
 
         // Right-click menu: "Hide <app>" on an app row, "Options..." everywhere. Can be turned off in the options.
@@ -2373,6 +2624,7 @@ namespace Jackamixer
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             timer.Stop();
+            StopMedia();
             rowMenu.Dispose();
             Backdrop.Release();
             base.OnFormClosed(e);
@@ -2383,6 +2635,10 @@ namespace Jackamixer
             ticks++;
             if (ticks % 30 == 0) { try { RefreshChannels(false); } catch { } }
             foreach (var r in rows) { try { r.Tick(); } catch { } }
+            // the now-playing row comes and goes with the media; otherwise it only redraws
+            bool wantMedia = showMedia && media != null && media.Latest != null;
+            if (wantMedia != mediaShown) { try { RefreshChannels(true); } catch { } }
+            else if (nowRow != null) nowRow.Tick();
         }
 
         void RefreshChannels(bool force)
@@ -2406,7 +2662,9 @@ namespace Jackamixer
         {
             int rowH = ChannelRow.HeightFor(s), sepH = P(9), pad = P(6), emptyH = P(44), w = P(380);
             bool hasMaster = engine.Master != null;
-            int total = pad * 2 + (hasMaster ? rowH + sepH : 0) + (apps.Count > 0 ? apps.Count * rowH : emptyH);
+            mediaShown = showMedia && media != null && media.Latest != null;
+            int nowH = mediaShown ? NowPlayingRow.HeightFor(s) : 0;
+            int total = pad * 2 + (hasMaster ? rowH + sepH : 0) + nowH + (apps.Count > 0 ? apps.Count * rowH : emptyH);
             if (workArea.IsEmpty) workArea = AvoidTaskbar(Screen.FromPoint(Cursor.Position).WorkingArea);
             int maxH = (int)(workArea.Height * 0.85);
             int h = Math.Min(total, maxH);
@@ -2422,6 +2680,16 @@ namespace Jackamixer
             {
                 AddRow(engine.Master, y, rw, rowH);
                 y += rowH;
+            }
+            nowRow = null;
+            if (mediaShown)
+            {
+                nowRow = new NowPlayingRow(s, media) { Bounds = new Rectangle(0, y, rw, nowH) };
+                AddOther(nowRow);
+                y += nowH;
+            }
+            if (hasMaster)
+            {
                 AddOther(new Separator(s) { Bounds = new Rectangle(0, y, rw, sepH) });
                 y += sepH;
             }
