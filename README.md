@@ -29,11 +29,14 @@ To remove it, run `uninstall.ps1`, then delete the folder.
 | --- | --- |
 | Drag the slider, or scroll on a row | change volume (scroll = 2% per notch) |
 | Click the app icon, or middle-click the row | mute / unmute |
-| Right-click the mixer, or Start menu > **Jackamixer Options** | change the hotkey, background picture, darkness and crop |
+| Right-click an app > **Hide** | take it out of the mixer (bring it back in Options) |
+| Right-click > **Options...**, or Start menu > **Jackamixer Options** | hotkey, background picture, darkness and crop, hidden apps, mixer behavior |
 
 The meter runs from -60 dB to 0 dB, turns yellow above -6 dB and red above -1 dB; the small tick holds the recent peak.
 
-In Options you can also turn off right-click, or turn on a small gear button on the mixer.
+In Options you can also choose whether the hotkey **opens** the mixer (clicking away closes it, the default) or **toggles** it (it stays open on top until you press the hotkey again), turn off the right-click menu, or turn on a small gear button on the mixer.
+
+Why is iCUE (or Discord, OBS, Wallpaper Engine) bouncing when it isn't making sound? Apps with audio-reactive features listen to your speakers, Windows lists that as a session on your speakers, and its meter shows everything it hears. Hide it if it bugs you.
 
 ## Settings file
 
@@ -48,6 +51,8 @@ background_x=50
 background_y=50
 show_gear=0
 right_click_options=1
+hidden_apps=icue.exe
+hotkey_mode=close
 ```
 
 ## Command line

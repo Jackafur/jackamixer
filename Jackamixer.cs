@@ -247,6 +247,7 @@ namespace Jackamixer
     class AppChannel : Channel
     {
         public bool IsSystem;
+        public string HideId; // "discord.exe" style id used by hidden_apps; null when it can't be hidden
         public readonly List<SessionRef> Sessions = new List<SessionRef>();
 
         public override float Volume
@@ -371,6 +372,7 @@ namespace Jackamixer
                 if (!map.TryGetValue(key, out ch))
                 {
                     ch = new AppChannel { Key = key, IsSystem = sys };
+                    ch.HideId = sys ? "system sounds" : path != null ? Path.GetFileName(path).ToLowerInvariant() : null;
                     ch.Name = ResolveName(c, key, path, sys);
                     ch.Icon = ResolveIcon(c, key, path);
                     map[key] = ch;
@@ -489,7 +491,7 @@ namespace Jackamixer
     static class Config
     {
         public const string DefaultHotkey = @"Win+\";
-        static readonly string[] Order = { "hotkey", "background", "background_dim", "background_zoom", "background_x", "background_y", "show_gear", "right_click_options" };
+        static readonly string[] Order = { "hotkey", "background", "background_dim", "background_zoom", "background_x", "background_y", "show_gear", "right_click_options", "hidden_apps", "hotkey_mode" };
 
         static string FilePath
         {
@@ -507,6 +509,7 @@ namespace Jackamixer
                 case "background_y": return "50";
                 case "show_gear": return "0";
                 case "right_click_options": return "1";
+                case "hotkey_mode": return "close";
             }
             return "";
         }
@@ -544,6 +547,8 @@ namespace Jackamixer
             sb.Append("; background_x/y   0 to 100, which part of the picture sits in the middle of the mixer.\r\n");
             sb.Append("; show_gear            1 = gear button on the mixer that opens these options.\r\n");
             sb.Append("; right_click_options  1 = right-clicking the mixer opens these options.\r\n");
+            sb.Append("; hidden_apps          apps left out of the mixer, by exe name, separated by ;  e.g. icue.exe;steamwebhelper.exe\r\n");
+            sb.Append("; hotkey_mode          close = hotkey opens the mixer, clicking away closes it. toggle = hotkey opens and closes it.\r\n");
             foreach (string k in Order)
             {
                 string v;
@@ -581,6 +586,26 @@ namespace Jackamixer
         }
 
         public static bool GetBool(string key) { return Get(key) == "1"; }
+
+        public static HashSet<string> HiddenApps()
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string part in Get("hidden_apps").Split(';'))
+            {
+                string t = part.Trim();
+                if (t.Length > 0) set.Add(t);
+            }
+            return set;
+        }
+
+        public static void SetHidden(string id, bool hide)
+        {
+            var set = HiddenApps();
+            if (hide) set.Add(id); else set.Remove(id);
+            var list = new List<string>(set);
+            list.Sort(StringComparer.OrdinalIgnoreCase);
+            Set("hidden_apps", string.Join(";", list.ToArray()));
+        }
 
         public static string ReadHotkey()
         {
@@ -1147,6 +1172,33 @@ namespace Jackamixer
         }
     }
 
+    // Dark look for the small right-click menu on app rows.
+    class MenuRenderer : ToolStripProfessionalRenderer
+    {
+        protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+        {
+            using (var b = new SolidBrush(Theme.Bg)) e.Graphics.FillRectangle(b, e.AffectedBounds);
+        }
+        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+        {
+            using (var p = new Pen(Theme.Line)) e.Graphics.DrawRectangle(p, 0, 0, e.AffectedBounds.Width - 1, e.AffectedBounds.Height - 1);
+        }
+        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+        {
+            using (var b = new SolidBrush(e.Item.Selected ? Theme.RowHover : Theme.Bg))
+                e.Graphics.FillRectangle(b, new Rectangle(Point.Empty, e.Item.Size));
+        }
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            e.TextColor = Theme.Text;
+            base.OnRenderItemText(e);
+        }
+        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+        {
+            using (var b = new SolidBrush(Theme.Line)) e.Graphics.FillRectangle(b, 4, e.Item.Height / 2, e.Item.Width - 8, 1);
+        }
+    }
+
     // ---------------- Options window ----------------
 
     class OptionsDialog : Form
@@ -1160,6 +1212,7 @@ namespace Jackamixer
         readonly CropPreview preview;
         readonly SimpleSlider dimSlider, zoomSlider;
         bool capturing;
+        bool childOpen; // file picker or message box up: don't close on deactivate
 
         public OptionsDialog(Host host, Size mixerSize)
         {
@@ -1169,14 +1222,13 @@ namespace Jackamixer
             MaximizeBox = false;
             MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            TopMost = true;
             KeyPreview = true;
             BackColor = Theme.Bg;
             ForeColor = Theme.Text;
             Font = Theme.NameFont;
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
             using (var g = CreateGraphics()) s = g.DpiX / 96f;
-            ClientSize = new Size(P(600), P(470));
+            ClientSize = new Size(P(860), P(540));
 
             // left: picture preview shaped like the mixer
             int ph = P(340);
@@ -1187,10 +1239,11 @@ namespace Jackamixer
             preview.CropChanged += (o, e) => zoomSlider.Value = (int)Math.Round(preview.Crop.Zoom * 100);
             preview.CropCommitted += (o, e) => preview.Crop.Save();
             Controls.Add(preview);
-            Controls.Add(MakeLabel("Drag the picture to move it, scroll to zoom.", P(20), P(20) + ph + P(8), pw + P(40), Theme.SubText));
+            var hint = MakeLabel("Drag to move, scroll to zoom.", P(20), P(20) + ph + P(8), pw + P(20), Theme.SubText);
+            hint.Height = P(40); // wraps instead of running under the middle column
 
             // right: hotkey
-            int x = P(20) + pw + P(30), w = ClientSize.Width - x - P(20);
+            int x = P(20) + pw + P(30), w = P(280);
             Controls.Add(MakeLabel("Hotkey", x, P(20), w, Theme.SubText));
             hotkeyValue = MakeLabel(Config.ReadHotkey(), x, P(42), w, Theme.Text);
             hotkeyValue.Font = new Font(Theme.NameFont.FontFamily, 14f);
@@ -1232,7 +1285,28 @@ namespace Jackamixer
             // optional extra ways to get here, off by default
             Controls.Add(MakeLabel("On the mixer", x, P(362), w, Theme.SubText));
             MakeCheck("Gear button opens options", "show_gear", x, P(384), w);
-            MakeCheck("Right-click opens options", "right_click_options", x, P(410), w);
+            MakeCheck("Right-click menu (hide app, options)", "right_click_options", x, P(410), w);
+
+            Controls.Add(MakeLabel("Mixer behavior", x, P(446), w, Theme.SubText));
+            MakeRadio("Hotkey opens it, clicking away closes it", "close", x, P(468), w);
+            MakeRadio("Hotkey toggles it on and off", "toggle", x, P(494), w);
+
+            // third column: which apps show up in the mixer
+            int ax = ClientSize.Width - P(240), aw = P(220);
+            MakeLabel("Show in the mixer (untick to hide)", ax, P(20), aw + P(10), Theme.SubText);
+            var apps = new CheckedListBox
+            {
+                Bounds = new Rectangle(ax, P(46), aw, P(340)),
+                CheckOnClick = true, BorderStyle = BorderStyle.None, IntegralHeight = false,
+                BackColor = Theme.Bg, ForeColor = Theme.Text, Font = Theme.NameFont
+            };
+            FillApps(apps);
+            apps.ItemCheck += (o, e) =>
+            {
+                var item = (AppItem)apps.Items[e.Index];
+                Config.SetHidden(item.Id, e.NewValue != CheckState.Checked);
+            };
+            Controls.Add(apps);
 
             var done = MakeButton("Done", new Rectangle(P(20), ClientSize.Height - P(52), P(110), P(32)));
             done.Click += (o, e) => Close();
@@ -1256,6 +1330,42 @@ namespace Jackamixer
             b.FlatAppearance.BorderColor = Theme.Line;
             Controls.Add(b);
             return b;
+        }
+
+        class AppItem
+        {
+            public string Id, Name;
+            public override string ToString() { return Name; }
+        }
+
+        // Apps that currently have audio sessions, plus hidden ones that aren't running right now.
+        void FillApps(CheckedListBox list)
+        {
+            var hidden = Config.HiddenApps();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var engine = new AudioEngine(P(16));
+                engine.Open();
+                foreach (var a in engine.ReadApps())
+                    if (a.HideId != null && seen.Add(a.HideId))
+                        list.Items.Add(new AppItem { Id = a.HideId, Name = a.Name }, !hidden.Contains(a.HideId));
+            }
+            catch { }
+            foreach (string id in hidden)
+                if (seen.Add(id))
+                    list.Items.Add(new AppItem { Id = id, Name = id + " (not running)" }, false);
+        }
+
+        void MakeRadio(string text, string mode, int x, int y, int w)
+        {
+            var r = new RadioButton
+            {
+                Text = text, Bounds = new Rectangle(x, y, w, P(24)), Checked = Config.Get("hotkey_mode") == mode,
+                ForeColor = Theme.Text, BackColor = Theme.Bg, FlatStyle = FlatStyle.Flat, TabStop = false
+            };
+            r.CheckedChanged += (o, e) => { if (r.Checked) Config.Set("hotkey_mode", mode); };
+            Controls.Add(r);
         }
 
         void MakeCheck(string text, string key, int x, int y, int w)
@@ -1285,9 +1395,18 @@ namespace Jackamixer
             {
                 dlg.Title = "Pick a background picture for Jackamixer";
                 dlg.Filter = "Pictures|*.png;*.jpg;*.jpeg;*.bmp;*.gif|All files|*.*";
-                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                childOpen = true;
+                DialogResult picked = dlg.ShowDialog(this);
+                childOpen = false;
+                if (picked != DialogResult.OK) return;
                 Bitmap src = Backdrop.Source(dlg.FileName);
-                if (src == null) { MessageBox.Show(this, "Could not open that picture.", "Jackamixer"); return; }
+                if (src == null)
+                {
+                    childOpen = true;
+                    MessageBox.Show(this, "Could not open that picture.", "Jackamixer");
+                    childOpen = false;
+                    return;
+                }
                 Config.Set("background", dlg.FileName);
                 preview.Source = src;
                 preview.Crop.Zoom = 1f;
@@ -1369,6 +1488,19 @@ namespace Jackamixer
             hotkeyStatus.Text = "Saved.";
         }
 
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            Activate();
+        }
+
+        // Like the mixer: clicking anywhere else closes it (everything is already saved).
+        protected override void OnDeactivate(EventArgs e)
+        {
+            base.OnDeactivate(e);
+            if (host != null && !childOpen && !capturing) BeginInvoke((Action)Close);
+        }
+
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             if (capturing) StopCapture();
@@ -1387,7 +1519,9 @@ namespace Jackamixer
         readonly float s;
         readonly bool snapshot;
         readonly Host host;
-        readonly bool showGear, rightClickOptions;
+        readonly bool showGear, rightClickOptions, closeOnClickAway;
+        readonly HashSet<string> hidden;
+        readonly ContextMenuStrip rowMenu = new ContextMenuStrip();
         Rectangle workArea;
         string signature = "";
         int ticks;
@@ -1399,6 +1533,11 @@ namespace Jackamixer
             this.host = host;
             showGear = Config.GetBool("show_gear");
             rightClickOptions = Config.GetBool("right_click_options");
+            closeOnClickAway = Config.Get("hotkey_mode") != "toggle";
+            hidden = Config.HiddenApps();
+            rowMenu.Renderer = new MenuRenderer();
+            rowMenu.ShowImageMargin = false;
+            rowMenu.Font = Theme.NameFont;
             Text = "Jackamixer";
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
@@ -1427,11 +1566,34 @@ namespace Jackamixer
             Close();
         }
 
-        // Optional (off by default): right-click anywhere in the mixer opens the options.
+        // Right-click menu: "Hide <app>" on an app row, "Options..." everywhere. Can be turned off in the options.
         void HookRightClick(Control c)
         {
             if (!rightClickOptions) return;
-            c.MouseUp += (o, e) => { if (e.Button == MouseButtons.Right) OpenOptions(); };
+            c.MouseUp += (o, e) =>
+            {
+                if (e.Button != MouseButtons.Right) return;
+                var row = c as ChannelRow;
+                ShowMenu(c, row == null ? null : row.Ch as AppChannel, e.Location);
+            };
+        }
+
+        void ShowMenu(Control source, AppChannel app, Point at)
+        {
+            rowMenu.Items.Clear();
+            if (app != null && app.HideId != null)
+            {
+                rowMenu.Items.Add("Hide " + app.Name, null, (o, e) =>
+                {
+                    Config.SetHidden(app.HideId, true);
+                    hidden.Add(app.HideId);
+                    // after the menu has closed, since the row it came from goes away
+                    BeginInvoke((Action)(() => RefreshChannels(true)));
+                });
+                rowMenu.Items.Add(new ToolStripSeparator());
+            }
+            rowMenu.Items.Add("Options...", null, (o, e) => BeginInvoke((Action)OpenOptions));
+            rowMenu.Show(source, at);
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -1456,7 +1618,7 @@ namespace Jackamixer
         protected override void OnDeactivate(EventArgs e)
         {
             base.OnDeactivate(e);
-            if (activatedOnce && !snapshot) Close();
+            if (activatedOnce && !snapshot && closeOnClickAway) Close();
         }
 
         protected override void OnKeyDown(KeyEventArgs e)
@@ -1468,6 +1630,7 @@ namespace Jackamixer
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             timer.Stop();
+            rowMenu.Dispose();
             Backdrop.Release();
             base.OnFormClosed(e);
         }
@@ -1483,6 +1646,7 @@ namespace Jackamixer
         {
             if (engine.CurrentDefaultId() != engine.DeviceId) { engine.Open(); force = true; }
             List<AppChannel> apps = engine.ReadApps();
+            apps.RemoveAll(a => a.HideId != null && hidden.Contains(a.HideId));
             var sb = new StringBuilder(engine.DeviceId ?? "");
             foreach (var a in apps)
             {
