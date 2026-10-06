@@ -10,6 +10,10 @@ A small volume mixer for Windows 10/11 with live level meters. One row per app: 
 - Follows your Windows accent color and light/dark mode.
 - Optional background picture, with drag-to-position and zoom.
 
+## Why I made it
+
+The Windows 11 volume mixer gives every app a slider, but it doesn't show how loud each app actually is, so when something starts making noise you're stuck guessing which one it is. If there's an option for that somewhere, I couldn't find it. The old mixer (sndvol) does have meters, but it looks like it's from 2009 and it's buried. So I made my own: one hotkey, a live meter on every app, and nothing sitting in the tray.
+
 ## Install
 
 1. Download or clone this folder to where you want it to live.
