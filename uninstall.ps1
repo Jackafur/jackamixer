@@ -7,5 +7,6 @@ if (Test-Path $exe) { Start-Process $exe -ArgumentList '--quit' -Wait }
 $programs = [Environment]::GetFolderPath('Programs')
 $startup = [Environment]::GetFolderPath('Startup')
 Remove-Item (Join-Path $programs 'Jackamixer.lnk') -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $programs 'Jackamixer Options.lnk') -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $startup 'Jackamixer (hotkey).lnk') -ErrorAction SilentlyContinue
 Write-Host 'Jackamixer removed. You can delete this folder now.'

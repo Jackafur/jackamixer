@@ -423,7 +423,7 @@ namespace Jackamixer
     {
         public static bool Dark = true;
         public static Color Bg, RowHover, Text, SubText, Track, Thumb, ThumbEdge, Line, Accent, Meter, MeterHot, MeterClip, Hold;
-        public static Font NameFont, GlyphFont, SmallGlyph;
+        public static Font NameFont, GlyphFont, SmallGlyph, GearFont;
 
         public static void Load()
         {
@@ -471,6 +471,7 @@ namespace Jackamixer
             NameFont = new Font(ui, 9.75f);
             GlyphFont = new Font(ic, 13f);
             SmallGlyph = new Font(ic, 7f);
+            GearFont = new Font(ic, 10f);
         }
 
         static Color Hex(int rgb) { return Color.FromArgb((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF); }
@@ -488,7 +489,7 @@ namespace Jackamixer
     static class Config
     {
         public const string DefaultHotkey = @"Win+\";
-        static readonly string[] Order = { "hotkey", "background", "background_dim" };
+        static readonly string[] Order = { "hotkey", "background", "background_dim", "background_zoom", "background_x", "background_y", "show_gear", "right_click_options" };
 
         static string FilePath
         {
@@ -497,8 +498,16 @@ namespace Jackamixer
 
         static string Default(string key)
         {
-            if (key == "hotkey") return DefaultHotkey;
-            if (key == "background_dim") return "55";
+            switch (key)
+            {
+                case "hotkey": return DefaultHotkey;
+                case "background_dim": return "55";
+                case "background_zoom": return "100";
+                case "background_x": return "50";
+                case "background_y": return "50";
+                case "show_gear": return "0";
+                case "right_click_options": return "1";
+            }
             return "";
         }
 
@@ -525,12 +534,16 @@ namespace Jackamixer
         static void Save(Dictionary<string, string> d)
         {
             var sb = new StringBuilder();
-            sb.Append("; Jackamixer settings. Easiest way to change these: open Jackamixer and use the links at the bottom.\r\n");
+            sb.Append("; Jackamixer settings. Easiest way to change these: Start menu > Jackamixer Options.\r\n");
             sb.Append("; If you edit this file by hand, run  Jackamixer.exe --reload  afterwards.\r\n");
             sb.Append(";\r\n");
-            sb.Append("; hotkey          Win, Ctrl, Alt, Shift joined with + and then one key. Examples: Win+\\  Ctrl+Alt+M  F13\r\n");
-            sb.Append("; background      full path to a picture (png, jpg, bmp, gif). Empty = plain.\r\n");
-            sb.Append("; background_dim  0 to 90, how much the picture is darkened so the text stays readable.\r\n");
+            sb.Append("; hotkey           Win, Ctrl, Alt, Shift joined with + and then one key. Examples: Win+\\  Ctrl+Alt+M  F13\r\n");
+            sb.Append("; background       full path to a picture (png, jpg, bmp, gif). Empty = plain.\r\n");
+            sb.Append("; background_dim   0 to 90, how much the picture is darkened so the text stays readable.\r\n");
+            sb.Append("; background_zoom  100 to 500 (percent).\r\n");
+            sb.Append("; background_x/y   0 to 100, which part of the picture sits in the middle of the mixer.\r\n");
+            sb.Append("; show_gear            1 = gear button on the mixer that opens these options.\r\n");
+            sb.Append("; right_click_options  1 = right-clicking the mixer opens these options.\r\n");
             foreach (string k in Order)
             {
                 string v;
@@ -559,6 +572,15 @@ namespace Jackamixer
             d[key] = value;
             Save(d);
         }
+
+        public static void SetMany(params string[] pairs)
+        {
+            var d = Load();
+            for (int i = 0; i + 1 < pairs.Length; i += 2) d[pairs[i]] = pairs[i + 1];
+            Save(d);
+        }
+
+        public static bool GetBool(string key) { return Get(key) == "1"; }
 
         public static string ReadHotkey()
         {
@@ -628,6 +650,34 @@ namespace Jackamixer
 
     // ---------------- Background picture ----------------
 
+    // Where the picture sits: zoom (1 = just covers the mixer) and which point of the
+    // picture (0..1 fractions) lands in the middle of the mixer.
+    struct Crop
+    {
+        public float Zoom, X, Y;
+        public int Dim;
+
+        public static Crop FromConfig()
+        {
+            return new Crop
+            {
+                Zoom = Config.GetInt("background_zoom", 100, 500) / 100f,
+                X = Config.GetInt("background_x", 0, 100) / 100f,
+                Y = Config.GetInt("background_y", 0, 100) / 100f,
+                Dim = Config.GetInt("background_dim", 0, 90)
+            };
+        }
+
+        public void Save()
+        {
+            Config.SetMany(
+                "background_zoom", ((int)Math.Round(Zoom * 100)).ToString(),
+                "background_x", ((int)Math.Round(X * 100)).ToString(),
+                "background_y", ((int)Math.Round(Y * 100)).ToString(),
+                "background_dim", Dim.ToString());
+        }
+    }
+
     // Optional picture behind the whole flyout, darkened so text stays readable.
     // Every control paints its own slice of one form-sized frame.
     static class Backdrop
@@ -636,45 +686,66 @@ namespace Jackamixer
         static Bitmap source;
         static string sourcePath;
 
-        public static bool Active { get { return frame != null; } }
+        // Small cached copy of the picture, so a 4K wallpaper doesn't sit in memory.
+        public static Bitmap Source(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            if (path == sourcePath) return source;
+            if (source != null) source.Dispose();
+            source = null;
+            sourcePath = path;
+            try
+            {
+                using (var img = Image.FromFile(path))
+                {
+                    float k = Math.Min(1f, 1600f / Math.Max(img.Width, img.Height));
+                    source = new Bitmap(Math.Max(1, (int)(img.Width * k)), Math.Max(1, (int)(img.Height * k)));
+                    using (var g = Graphics.FromImage(source))
+                    {
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(img, 0, 0, source.Width, source.Height);
+                    }
+                }
+            }
+            catch { source = null; }
+            return source;
+        }
+
+        // Rectangle the picture is drawn into for a target of this size.
+        public static RectangleF Place(Size size, Bitmap src, Crop c)
+        {
+            float k = Math.Max(size.Width / (float)src.Width, size.Height / (float)src.Height) * Math.Max(1f, c.Zoom);
+            float w = src.Width * k, h = src.Height * k;
+            float x = size.Width / 2f - c.X * w, y = size.Height / 2f - c.Y * h;
+            x = Math.Min(0f, Math.Max(size.Width - w, x));
+            y = Math.Min(0f, Math.Max(size.Height - h, y));
+            return new RectangleF(x, y, w, h);
+        }
+
+        // Keeps X/Y inside the range where the picture still covers the target.
+        public static void ClampCrop(Size size, Bitmap src, ref Crop c)
+        {
+            float k = Math.Max(size.Width / (float)src.Width, size.Height / (float)src.Height) * Math.Max(1f, c.Zoom);
+            float w = src.Width * k, h = src.Height * k;
+            float mx = size.Width / 2f / w, my = size.Height / 2f / h;
+            c.X = Math.Max(mx, Math.Min(1f - mx, c.X));
+            c.Y = Math.Max(my, Math.Min(1f - my, c.Y));
+        }
+
+        public static void Compose(Graphics g, Size size, Bitmap src, Crop c)
+        {
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.DrawImage(src, Place(size, src, c));
+            using (var b = new SolidBrush(Color.FromArgb((int)(c.Dim * 2.55f), Theme.Bg))) g.FillRectangle(b, 0, 0, size.Width, size.Height);
+        }
 
         public static void Build(Size size)
         {
             Release();
-            string path = Config.Get("background");
-            if (string.IsNullOrEmpty(path) || size.Width <= 0 || size.Height <= 0) return;
-            if (path != sourcePath)
-            {
-                if (source != null) source.Dispose();
-                source = null;
-                sourcePath = path;
-                try
-                {
-                    // Keep a small copy only, so a 4K wallpaper doesn't sit in memory.
-                    using (var img = Image.FromFile(path))
-                    {
-                        float k = Math.Min(1f, 1200f / Math.Max(img.Width, img.Height));
-                        source = new Bitmap(Math.Max(1, (int)(img.Width * k)), Math.Max(1, (int)(img.Height * k)));
-                        using (var g = Graphics.FromImage(source))
-                        {
-                            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                            g.DrawImage(img, 0, 0, source.Width, source.Height);
-                        }
-                    }
-                }
-                catch { source = null; }
-            }
-            if (source == null) return;
-            int dim = Config.GetInt("background_dim", 0, 90);
+            Bitmap src = Source(Config.Get("background"));
+            if (src == null || size.Width <= 0 || size.Height <= 0) return;
             frame = new Bitmap(size.Width, size.Height);
-            using (var g = Graphics.FromImage(frame))
-            {
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                float scale = Math.Max(size.Width / (float)source.Width, size.Height / (float)source.Height);
-                float w = source.Width * scale, h = source.Height * scale;
-                g.DrawImage(source, (size.Width - w) / 2f, (size.Height - h) / 2f, w, h);
-                using (var b = new SolidBrush(Color.FromArgb((int)(dim * 2.55f), Theme.Bg))) g.FillRectangle(b, 0, 0, size.Width, size.Height);
-            }
+            using (var g = Graphics.FromImage(frame)) Compose(g, size, src, Crop.FromConfig());
         }
 
         public static void Release()
@@ -708,19 +779,46 @@ namespace Jackamixer
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
         }
         protected int P(float v) { return (int)Math.Round(v * s); }
+
+        // Same slider look everywhere: rounded track, accent fill, ringed thumb.
+        protected void DrawSlider(Graphics g, int x0, int x1, int y, float frac, Color fill, bool big)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            int tx = x0 + (int)Math.Round((x1 - x0) * Util.Clamp01(frac));
+            using (var p = new Pen(Theme.Track, P(4)))
+            {
+                p.StartCap = p.EndCap = LineCap.Round;
+                g.DrawLine(p, x0, y, x1, y);
+            }
+            if (tx > x0)
+            {
+                using (var p = new Pen(fill, P(4)))
+                {
+                    p.StartCap = p.EndCap = LineCap.Round;
+                    g.DrawLine(p, x0, y, tx, y);
+                }
+            }
+            int ro = P(9), ri = big ? P(6) : P(5);
+            using (var b = new SolidBrush(Theme.Thumb)) g.FillEllipse(b, tx - ro, y - ro, ro * 2, ro * 2);
+            using (var p = new Pen(Theme.ThumbEdge, 1f)) g.DrawEllipse(p, tx - ro, y - ro, ro * 2, ro * 2);
+            using (var b = new SolidBrush(fill)) g.FillEllipse(b, tx - ri, y - ri, ri * 2, ri * 2);
+        }
     }
 
     class ChannelRow : PaintedControl
     {
         public readonly Channel Ch;
-        bool hover, dragging;
+        public event EventHandler OptionsClicked;
+        readonly bool gear;
+        bool hover, dragging, gearHover;
         float vol, shown, hold;
         bool muted;
         int holdTicks;
 
-        public ChannelRow(Channel ch, float scale) : base(scale)
+        public ChannelRow(Channel ch, float scale, bool showGear) : base(scale)
         {
             Ch = ch;
+            gear = showGear && ch.IsMaster;
             SetStyle(ControlStyles.Selectable, true);
             vol = ch.Volume;
             muted = ch.Muted;
@@ -729,6 +827,7 @@ namespace Jackamixer
         int X0 { get { return P(52); } }
         int X1 { get { return Width - P(18); } }
         Rectangle IconRect { get { return new Rectangle(P(14), (Height - P(26)) / 2, P(26), P(26)); } }
+        Rectangle GearRect { get { return gear ? new Rectangle(X1 - P(16), P(6), P(24), P(24)) : Rectangle.Empty; } }
 
         // -60 dB .. 0 dB mapped onto the bar, so quiet audio still shows.
         static float MeterPos(float p)
@@ -796,33 +895,22 @@ namespace Jackamixer
 
             int x0 = X0, x1 = X1;
 
-            // name + percent
+            // gear (master row only), name, percent
+            int textRight = x1;
+            if (gear)
+            {
+                Rectangle gr = GearRect;
+                TextRenderer.DrawText(g, "", Theme.GearFont, gr, gearHover ? Theme.Text : Theme.SubText, center);
+                textRight = gr.Left - P(6);
+            }
             var left = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
             var right = TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
-            TextRenderer.DrawText(g, Ch.Name, Theme.NameFont, new Rectangle(x0 - P(1), P(8), x1 - x0 - P(56), P(20)), muted ? Theme.SubText : Theme.Text, left);
+            TextRenderer.DrawText(g, Ch.Name, Theme.NameFont, new Rectangle(x0 - P(1), P(8), textRight - x0 - P(52), P(20)), muted ? Theme.SubText : Theme.Text, left);
             string pct = muted ? "Muted" : ((int)Math.Round(vol * 100)).ToString();
-            TextRenderer.DrawText(g, pct, Theme.NameFont, new Rectangle(x1 - P(56), P(8), P(58), P(20)), Theme.SubText, right);
+            TextRenderer.DrawText(g, pct, Theme.NameFont, new Rectangle(textRight - P(56), P(8), P(58), P(20)), Theme.SubText, right);
 
             // volume slider
-            int sy = P(34);
-            int tx = x0 + (int)Math.Round((x1 - x0) * vol);
-            using (var p = new Pen(Theme.Track, P(4)))
-            {
-                p.StartCap = p.EndCap = LineCap.Round;
-                g.DrawLine(p, x0, sy, x1, sy);
-            }
-            if (tx > x0)
-            {
-                using (var p = new Pen(muted ? Theme.SubText : Theme.Accent, P(4)))
-                {
-                    p.StartCap = p.EndCap = LineCap.Round;
-                    g.DrawLine(p, x0, sy, tx, sy);
-                }
-            }
-            int ro = P(9), ri = (hover || dragging) ? P(6) : P(5);
-            using (var b = new SolidBrush(Theme.Thumb)) g.FillEllipse(b, tx - ro, sy - ro, ro * 2, ro * 2);
-            using (var p = new Pen(Theme.ThumbEdge, 1f)) g.DrawEllipse(p, tx - ro, sy - ro, ro * 2, ro * 2);
-            using (var b = new SolidBrush(muted ? Theme.SubText : Theme.Accent)) g.FillEllipse(b, tx - ri, sy - ri, ri * 2, ri * 2);
+            DrawSlider(g, x0, x1, P(34), vol, muted ? Theme.SubText : Theme.Accent, hover || dragging);
 
             // level meter
             g.SmoothingMode = SmoothingMode.None;
@@ -844,17 +932,29 @@ namespace Jackamixer
         }
 
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
-        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; gearHover = false; Invalidate(); base.OnMouseLeave(e); }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
             Focus();
+            if (e.Button == MouseButtons.Left && GearRect.Contains(e.Location))
+            {
+                if (OptionsClicked != null) OptionsClicked(this, EventArgs.Empty);
+                return;
+            }
             if (e.Button == MouseButtons.Middle || (e.Button == MouseButtons.Left && IconRect.Contains(e.Location))) { ToggleMute(); return; }
             if (e.Button == MouseButtons.Left && e.X >= X0 - P(12) && e.Y >= P(24)) { dragging = true; SetFromX(e.X); }
         }
 
-        protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); if (dragging) SetFromX(e.X); }
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (dragging) { SetFromX(e.X); return; }
+            bool g = GearRect.Contains(e.Location);
+            if (g != gearHover) { gearHover = g; Cursor = g ? Cursors.Hand : Cursors.Default; Invalidate(); }
+        }
+
         protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); dragging = false; Invalidate(); }
 
         protected override void OnMouseWheel(MouseEventArgs e)
@@ -912,123 +1012,243 @@ namespace Jackamixer
         protected override void OnMouseWheel(MouseEventArgs e) { base.OnMouseWheel(e); Invalidate(true); }
     }
 
-    // Bottom strip: "Change hotkey (Win+\)" on the left, "Background" on the right.
-    class Footer : PaintedControl
+    // Plain slider for the options window.
+    class SimpleSlider : PaintedControl
     {
-        readonly string hotkey;
-        int hoverPart; // 0 none, 1 hotkey, 2 background
-        public event EventHandler HotkeyClicked;
-        public event EventHandler BackgroundClicked;
+        public int Min, Max = 100;
+        int value;
+        bool dragging, hover;
+        public event EventHandler ValueChanged;
+        public event EventHandler Committed;
 
-        public Footer(float scale, string hotkeyText) : base(scale)
+        public SimpleSlider(float scale) : base(scale) { Height = P(28); }
+
+        public int Value
         {
-            hotkey = hotkeyText;
-            Cursor = Cursors.Hand;
+            get { return value; }
+            set { int v = Math.Max(Min, Math.Min(Max, value)); if (v != this.value) { this.value = v; Invalidate(); } }
         }
 
-        int PartAt(int x) { return x < Width / 2 ? 1 : 2; }
+        int X0 { get { return P(10); } }
+        int X1 { get { return Width - P(10); } }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(Theme.Bg);
+            DrawSlider(e.Graphics, X0, X1, Height / 2, (value - Min) / (float)Math.Max(1, Max - Min), Enabled ? Theme.Accent : Theme.SubText, hover || dragging);
+        }
+
+        void SetFromX(int x)
+        {
+            int v = Min + (int)Math.Round(Util.Clamp01((x - X0) / (float)(X1 - X0)) * (Max - Min));
+            if (v == value) return;
+            Value = v;
+            if (ValueChanged != null) ValueChanged(this, EventArgs.Empty);
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); if (e.Button == MouseButtons.Left) { dragging = true; SetFromX(e.X); } }
+        protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); if (dragging) SetFromX(e.X); }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (!dragging) return;
+            dragging = false;
+            Invalidate();
+            if (Committed != null) Committed(this, EventArgs.Empty);
+        }
+    }
+
+    // Mixer-shaped preview of the background: drag to move the picture, scroll to zoom.
+    class CropPreview : PaintedControl
+    {
+        public Bitmap Source;
+        public Crop Crop;
+        public event EventHandler CropChanged;   // live, while dragging
+        public event EventHandler CropCommitted; // mouse released or wheel
+        bool dragging;
+        Point last;
+
+        public CropPreview(float scale) : base(scale) { Cursor = Cursors.SizeAll; }
+
+        public void ClampAndRefresh()
+        {
+            if (Source != null) Backdrop.ClampCrop(Size, Source, ref Crop);
+            Invalidate();
+        }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
-            Backdrop.Paint(g, this, false);
-            using (var b = new SolidBrush(Theme.Line)) g.FillRectangle(b, 0, 0, Width, 1);
-            var r = new Rectangle(P(16), 1, Width - P(32), Height - 1);
-            var flags = TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
-            TextRenderer.DrawText(g, "Change hotkey (" + hotkey + ")", Theme.NameFont, r, hoverPart == 1 ? Theme.Text : Theme.Accent, flags | TextFormatFlags.Left);
-            TextRenderer.DrawText(g, "Background", Theme.NameFont, r, hoverPart == 2 ? Theme.Text : Theme.Accent, flags | TextFormatFlags.Right);
+            g.Clear(Theme.Bg);
+            if (Source == null)
+            {
+                TextRenderer.DrawText(g, "No picture yet", Theme.NameFont, ClientRectangle, Theme.SubText,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            }
+            else
+            {
+                Backdrop.Compose(g, Size, Source, Crop);
+                // A few fake rows so it is obvious how readable the text will be.
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                for (int i = 0; i < 6; i++)
+                {
+                    int y = P(14) + i * P(40);
+                    if (y + P(30) > Height) break;
+                    using (var b = new SolidBrush(Color.FromArgb(200, Theme.Text))) g.FillRectangle(b, P(36), y, P(60) + (i * 37 % 40), P(5));
+                    using (var p = new Pen(Theme.Accent, P(3))) g.DrawLine(p, P(36), y + P(14), P(36) + (Width - P(56)) * (60 + i * 7) / 100, y + P(14));
+                    using (var b = new SolidBrush(Theme.Track)) g.FillEllipse(b, P(10), y, P(18), P(18));
+                }
+            }
+            using (var p = new Pen(Theme.Line)) g.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
+        }
+
+        RectangleF Placed() { return Backdrop.Place(Size, Source, Crop); }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (Source == null || e.Button != MouseButtons.Left) return;
+            dragging = true;
+            last = e.Location;
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
-            int p = PartAt(e.X);
-            if (p != hoverPart) { hoverPart = p; Invalidate(); }
+            if (!dragging) return;
+            RectangleF r = Placed();
+            Crop.X -= (e.X - last.X) / r.Width;
+            Crop.Y -= (e.Y - last.Y) / r.Height;
+            last = e.Location;
+            ClampAndRefresh();
+            if (CropChanged != null) CropChanged(this, EventArgs.Empty);
         }
 
-        protected override void OnMouseLeave(EventArgs e) { hoverPart = 0; Invalidate(); base.OnMouseLeave(e); }
-
-        protected override void OnMouseClick(MouseEventArgs e)
+        protected override void OnMouseUp(MouseEventArgs e)
         {
-            base.OnMouseClick(e);
-            if (e.Button != MouseButtons.Left) return;
-            EventHandler h = PartAt(e.X) == 1 ? HotkeyClicked : BackgroundClicked;
-            if (h != null) h(this, EventArgs.Empty);
+            base.OnMouseUp(e);
+            if (!dragging) return;
+            dragging = false;
+            if (CropCommitted != null) CropCommitted(this, EventArgs.Empty);
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            var he = e as HandledMouseEventArgs;
+            if (he != null) he.Handled = true;
+            if (Source == null) return;
+            Crop.Zoom = Math.Max(1f, Math.Min(5f, Crop.Zoom * (float)Math.Pow(1.1, e.Delta / 120.0)));
+            ClampAndRefresh();
+            if (CropChanged != null) CropChanged(this, EventArgs.Empty);
+            if (CropCommitted != null) CropCommitted(this, EventArgs.Empty);
         }
     }
 
-    // Dark menu for the Background link.
-    class MenuRenderer : ToolStripProfessionalRenderer
-    {
-        protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
-        {
-            using (var b = new SolidBrush(Theme.Bg)) e.Graphics.FillRectangle(b, e.AffectedBounds);
-        }
-        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
-        {
-            using (var p = new Pen(Theme.Line)) e.Graphics.DrawRectangle(p, 0, 0, e.AffectedBounds.Width - 1, e.AffectedBounds.Height - 1);
-        }
-        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
-        {
-            using (var b = new SolidBrush(e.Item.Selected && e.Item.Enabled ? Theme.RowHover : Theme.Bg))
-                e.Graphics.FillRectangle(b, new Rectangle(Point.Empty, e.Item.Size));
-        }
-        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
-        {
-            e.TextColor = e.Item.Enabled ? Theme.Text : Theme.SubText;
-            base.OnRenderItemText(e);
-        }
-        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
-        {
-            using (var b = new SolidBrush(Theme.Line)) e.Graphics.FillRectangle(b, 4, e.Item.Height / 2, e.Item.Width - 8, 1);
-        }
-    }
+    // ---------------- Options window ----------------
 
-    // "Press the keys you want" window. Only accepts combos Windows lets us register.
-    class HotkeyDialog : Form
+    class OptionsDialog : Form
     {
         [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
 
         readonly Host host;
-        readonly Label status;
         readonly float s;
+        readonly Label hotkeyValue, hotkeyStatus;
+        readonly Button changeBtn, removeBtn;
+        readonly CropPreview preview;
+        readonly SimpleSlider dimSlider, zoomSlider;
+        bool capturing;
 
-        public HotkeyDialog(Host host)
+        public OptionsDialog(Host host, Size mixerSize)
         {
             this.host = host;
-            Text = "Jackamixer hotkey";
+            Text = "Jackamixer options";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
             TopMost = true;
+            KeyPreview = true;
             BackColor = Theme.Bg;
             ForeColor = Theme.Text;
             Font = Theme.NameFont;
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
             using (var g = CreateGraphics()) s = g.DpiX / 96f;
-            ClientSize = new Size(P(380), P(200));
+            ClientSize = new Size(P(600), P(470));
 
-            Controls.Add(new Label
+            // left: picture preview shaped like the mixer
+            int ph = P(340);
+            int pw = Math.Max(P(160), Math.Min(P(260), (int)(ph * mixerSize.Width / (float)Math.Max(1, mixerSize.Height))));
+            preview = new CropPreview(s) { Bounds = new Rectangle(P(20), P(20), pw, ph) };
+            preview.Source = Backdrop.Source(Config.Get("background"));
+            preview.Crop = Crop.FromConfig();
+            preview.CropChanged += (o, e) => zoomSlider.Value = (int)Math.Round(preview.Crop.Zoom * 100);
+            preview.CropCommitted += (o, e) => preview.Crop.Save();
+            Controls.Add(preview);
+            Controls.Add(MakeLabel("Drag the picture to move it, scroll to zoom.", P(20), P(20) + ph + P(8), pw + P(40), Theme.SubText));
+
+            // right: hotkey
+            int x = P(20) + pw + P(30), w = ClientSize.Width - x - P(20);
+            Controls.Add(MakeLabel("Hotkey", x, P(20), w, Theme.SubText));
+            hotkeyValue = MakeLabel(Config.ReadHotkey(), x, P(42), w, Theme.Text);
+            hotkeyValue.Font = new Font(Theme.NameFont.FontFamily, 14f);
+            hotkeyValue.Height = P(30);
+            changeBtn = MakeButton("Change", new Rectangle(x, P(78), P(110), P(32)));
+            changeBtn.Click += (o, e) => StartCapture();
+            var resetBtn = MakeButton("Use Win+\\", new Rectangle(x + P(120), P(78), P(110), P(32)));
+            resetBtn.Click += (o, e) => Apply(Config.DefaultHotkey);
+            hotkeyStatus = MakeLabel("", x, P(116), w, Theme.SubText);
+            hotkeyStatus.Height = P(40);
+
+            // right: background
+            Controls.Add(MakeLabel("Background picture", x, P(170), w, Theme.SubText));
+            var chooseBtn = MakeButton("Choose...", new Rectangle(x, P(194), P(110), P(32)));
+            chooseBtn.Click += (o, e) => ChoosePicture();
+            removeBtn = MakeButton("Remove", new Rectangle(x + P(120), P(194), P(110), P(32)));
+            removeBtn.Click += (o, e) =>
             {
-                Text = "Press the keys you want to open Jackamixer with.\r\nCurrent: " + Config.ReadHotkey(),
-                Bounds = new Rectangle(P(20), P(16), P(340), P(44)),
-                ForeColor = Theme.Text
-            });
-            status = new Label
-            {
-                Text = "Waiting for keys... (if nothing happens, Windows already uses that combo)",
-                Bounds = new Rectangle(P(20), P(66), P(340), P(64)),
-                ForeColor = Theme.SubText
+                Config.Set("background", "");
+                preview.Source = null;
+                preview.Invalidate();
+                UpdateEnabled();
             };
-            Controls.Add(status);
-            var reset = MakeButton("Use Win+\\", new Rectangle(P(20), P(146), P(160), P(34)));
-            reset.Click += (o, e) => Apply(Config.DefaultHotkey);
-            var cancel = MakeButton("Cancel", new Rectangle(P(240), P(146), P(120), P(34)));
-            cancel.Click += (o, e) => Close();
+
+            Controls.Add(MakeLabel("Darkness", x, P(244), w, Theme.SubText));
+            dimSlider = new SimpleSlider(s) { Min = 0, Max = 90, Bounds = new Rectangle(x - P(10), P(264), w + P(20), P(28)) };
+            dimSlider.Value = preview.Crop.Dim;
+            dimSlider.ValueChanged += (o, e) => { preview.Crop.Dim = dimSlider.Value; preview.Invalidate(); };
+            dimSlider.Committed += (o, e) => preview.Crop.Save();
+            Controls.Add(dimSlider);
+
+            Controls.Add(MakeLabel("Zoom", x, P(300), w, Theme.SubText));
+            zoomSlider = new SimpleSlider(s) { Min = 100, Max = 500, Bounds = new Rectangle(x - P(10), P(320), w + P(20), P(28)) };
+            zoomSlider.Value = (int)Math.Round(preview.Crop.Zoom * 100);
+            zoomSlider.ValueChanged += (o, e) => { preview.Crop.Zoom = zoomSlider.Value / 100f; preview.ClampAndRefresh(); };
+            zoomSlider.Committed += (o, e) => preview.Crop.Save();
+            Controls.Add(zoomSlider);
+
+            // optional extra ways to get here, off by default
+            Controls.Add(MakeLabel("On the mixer", x, P(362), w, Theme.SubText));
+            MakeCheck("Gear button opens options", "show_gear", x, P(384), w);
+            MakeCheck("Right-click opens options", "right_click_options", x, P(410), w);
+
+            var done = MakeButton("Done", new Rectangle(P(20), ClientSize.Height - P(52), P(110), P(32)));
+            done.Click += (o, e) => Close();
+
+            preview.ClampAndRefresh();
+            UpdateEnabled();
         }
 
         int P(float v) { return (int)Math.Round(v * s); }
+
+        Label MakeLabel(string text, int x, int y, int w, Color color)
+        {
+            var l = new Label { Text = text, Bounds = new Rectangle(x, y, w, P(22)), ForeColor = color, BackColor = Theme.Bg };
+            Controls.Add(l);
+            return l;
+        }
 
         Button MakeButton(string text, Rectangle bounds)
         {
@@ -1038,6 +1258,48 @@ namespace Jackamixer
             return b;
         }
 
+        void MakeCheck(string text, string key, int x, int y, int w)
+        {
+            var c = new CheckBox
+            {
+                Text = text, Bounds = new Rectangle(x, y, w, P(24)), Checked = Config.GetBool(key),
+                ForeColor = Theme.Text, BackColor = Theme.Bg, FlatStyle = FlatStyle.Flat, TabStop = false
+            };
+            c.CheckedChanged += (o, e) => Config.Set(key, c.Checked ? "1" : "0");
+            Controls.Add(c);
+        }
+
+        void UpdateEnabled()
+        {
+            bool has = preview.Source != null;
+            removeBtn.Enabled = has;
+            dimSlider.Enabled = has;
+            zoomSlider.Enabled = has;
+            dimSlider.Invalidate();
+            zoomSlider.Invalidate();
+        }
+
+        void ChoosePicture()
+        {
+            using (var dlg = new OpenFileDialog())
+            {
+                dlg.Title = "Pick a background picture for Jackamixer";
+                dlg.Filter = "Pictures|*.png;*.jpg;*.jpeg;*.bmp;*.gif|All files|*.*";
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                Bitmap src = Backdrop.Source(dlg.FileName);
+                if (src == null) { MessageBox.Show(this, "Could not open that picture.", "Jackamixer"); return; }
+                Config.Set("background", dlg.FileName);
+                preview.Source = src;
+                preview.Crop.Zoom = 1f;
+                preview.Crop.X = 0.5f;
+                preview.Crop.Y = 0.5f;
+                preview.ClampAndRefresh();
+                preview.Crop.Save();
+                zoomSlider.Value = 100;
+                UpdateEnabled();
+            }
+        }
+
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
@@ -1045,12 +1307,34 @@ namespace Jackamixer
             Native.DwmSetWindowAttribute(Handle, 20, ref dark, 4);
         }
 
+        void StartCapture()
+        {
+            if (host == null) return;
+            capturing = true;
+            host.PauseHotkey(); // so the current combo can be pressed here too
+            hotkeyValue.Text = "Press keys...";
+            hotkeyStatus.ForeColor = Theme.SubText;
+            hotkeyStatus.Text = "Hold Win, Ctrl or Alt and press a key. Esc cancels.";
+        }
+
+        void StopCapture()
+        {
+            capturing = false;
+            hotkeyValue.Text = Config.ReadHotkey();
+            if (host != null) host.RegisterFromConfig();
+        }
+
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            if (!capturing)
+            {
+                if (keyData == Keys.Escape) { Close(); return true; }
+                return base.ProcessCmdKey(ref msg, keyData);
+            }
             Keys key = keyData & Keys.KeyCode;
             if (key == Keys.ShiftKey || key == Keys.ControlKey || key == Keys.Menu || key == Keys.LWin || key == Keys.RWin) return true;
             bool win = (GetAsyncKeyState(0x5B) & 0x8000) != 0 || (GetAsyncKeyState(0x5C) & 0x8000) != 0;
-            if (keyData == Keys.Escape && !win) { Close(); return true; }
+            if (keyData == Keys.Escape && !win) { StopCapture(); hotkeyStatus.Text = ""; return true; }
             int mods = 0;
             if (win) mods |= 0x0008;
             if ((keyData & Keys.Control) != 0) mods |= 0x0002;
@@ -1060,8 +1344,8 @@ namespace Jackamixer
             if ((mods & 0x000B) == 0 && !aloneOk)
             {
                 // A bare letter or F-key would stop working everywhere else.
-                status.ForeColor = Theme.MeterClip;
-                status.Text = "Hold Win, Ctrl or Alt together with that key.";
+                hotkeyStatus.ForeColor = Theme.MeterClip;
+                hotkeyStatus.Text = "Hold Win, Ctrl or Alt together with that key.";
                 return true;
             }
             Apply(Config.Describe(mods, (int)key));
@@ -1070,18 +1354,25 @@ namespace Jackamixer
 
         void Apply(string text)
         {
+            if (host == null) return;
+            host.PauseHotkey();
             string err = host.TryHotkey(text);
             if (err != null)
             {
-                status.ForeColor = Theme.MeterClip;
-                status.Text = err;
+                hotkeyStatus.ForeColor = Theme.MeterClip;
+                hotkeyStatus.Text = err;
+                if (!capturing) host.RegisterFromConfig();
                 return;
             }
-            status.ForeColor = Theme.Meter;
-            status.Text = "Saved: " + text;
-            var t = new System.Windows.Forms.Timer { Interval = 800 };
-            t.Tick += (o, e) => { t.Stop(); t.Dispose(); Close(); };
-            t.Start();
+            StopCapture();
+            hotkeyStatus.ForeColor = Theme.Meter;
+            hotkeyStatus.Text = "Saved.";
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            if (capturing) StopCapture();
+            base.OnFormClosed(e);
         }
     }
 
@@ -1091,13 +1382,12 @@ namespace Jackamixer
     {
         readonly AudioEngine engine;
         readonly BackPanel list = new BackPanel();
-        readonly Footer footer;
-        readonly ContextMenuStrip bgMenu = new ContextMenuStrip();
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
         readonly List<ChannelRow> rows = new List<ChannelRow>();
         readonly float s;
         readonly bool snapshot;
         readonly Host host;
+        readonly bool showGear, rightClickOptions;
         Rectangle workArea;
         string signature = "";
         int ticks;
@@ -1107,6 +1397,8 @@ namespace Jackamixer
         {
             snapshot = snapshotMode;
             this.host = host;
+            showGear = Config.GetBool("show_gear");
+            rightClickOptions = Config.GetBool("right_click_options");
             Text = "Jackamixer";
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
@@ -1119,18 +1411,8 @@ namespace Jackamixer
             list.Dock = DockStyle.Fill;
             list.AutoScroll = true;
             list.BackColor = Theme.Bg;
-            footer = new Footer(s, Config.ReadHotkey()) { Dock = DockStyle.Bottom, Height = P(38) };
-            footer.HotkeyClicked += (o, e) =>
-            {
-                if (host != null) host.Request(Host.WM_CHANGE_HOTKEY);
-                Close();
-            };
-            footer.BackgroundClicked += (o, e) => ShowBackgroundMenu();
-            bgMenu.Renderer = new MenuRenderer();
-            bgMenu.ShowImageMargin = false;
-            bgMenu.Font = Theme.NameFont;
+            HookRightClick(list);
             Controls.Add(list);
-            Controls.Add(footer);
             engine.Open();
             RefreshChannels(true);
             timer.Interval = 33;
@@ -1139,35 +1421,17 @@ namespace Jackamixer
 
         int P(float v) { return (int)Math.Round(v * s); }
 
-        void ShowBackgroundMenu()
+        void OpenOptions()
         {
-            bool has = Config.Get("background").Length > 0;
-            bgMenu.Items.Clear();
-            bgMenu.Items.Add("Choose a picture...", null, (o, e) =>
-            {
-                if (host != null) host.Request(Host.WM_CHOOSE_BACKGROUND);
-                Close();
-            });
-            if (has)
-            {
-                bgMenu.Items.Add("Darker", null, (o, e) => SetDim(+10));
-                bgMenu.Items.Add("Lighter", null, (o, e) => SetDim(-10));
-                bgMenu.Items.Add(new ToolStripSeparator());
-                bgMenu.Items.Add("Remove picture", null, (o, e) => { Config.Set("background", ""); RedrawBackdrop(); });
-            }
-            bgMenu.Show(footer, new Point(footer.Width - P(8), 0), ToolStripDropDownDirection.AboveLeft);
+            if (host != null) host.OpenOptions(ClientSize, true);
+            Close();
         }
 
-        void SetDim(int delta)
+        // Optional (off by default): right-click anywhere in the mixer opens the options.
+        void HookRightClick(Control c)
         {
-            Config.Set("background_dim", Math.Max(0, Math.Min(90, Config.GetInt("background_dim", 0, 90) + delta)).ToString());
-            RedrawBackdrop();
-        }
-
-        void RedrawBackdrop()
-        {
-            Backdrop.Build(ClientSize);
-            Invalidate(true);
+            if (!rightClickOptions) return;
+            c.MouseUp += (o, e) => { if (e.Button == MouseButtons.Right) OpenOptions(); };
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -1204,7 +1468,6 @@ namespace Jackamixer
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             timer.Stop();
-            bgMenu.Dispose();
             Backdrop.Release();
             base.OnFormClosed(e);
         }
@@ -1236,7 +1499,7 @@ namespace Jackamixer
         {
             int rowH = P(58), sepH = P(9), pad = P(6), emptyH = P(44), w = P(380);
             bool hasMaster = engine.Master != null;
-            int total = pad * 2 + (hasMaster ? rowH + sepH : 0) + (apps.Count > 0 ? apps.Count * rowH : emptyH) + footer.Height;
+            int total = pad * 2 + (hasMaster ? rowH + sepH : 0) + (apps.Count > 0 ? apps.Count * rowH : emptyH);
             if (workArea.IsEmpty) workArea = Screen.FromPoint(Cursor.Position).WorkingArea;
             int maxH = (int)(workArea.Height * 0.85);
             int h = Math.Min(total, maxH);
@@ -1252,11 +1515,11 @@ namespace Jackamixer
             {
                 AddRow(engine.Master, y, rw, rowH);
                 y += rowH;
-                list.Controls.Add(new Separator(s) { Bounds = new Rectangle(0, y, rw, sepH) });
+                AddOther(new Separator(s) { Bounds = new Rectangle(0, y, rw, sepH) });
                 y += sepH;
             }
             if (apps.Count == 0)
-                list.Controls.Add(new Note(s, hasMaster ? "No apps are playing sound" : "No sound output device found") { Bounds = new Rectangle(0, y, rw, emptyH) });
+                AddOther(new Note(s, hasMaster ? "No apps are playing sound" : "No sound output device found") { Bounds = new Rectangle(0, y, rw, emptyH) });
             foreach (var a in apps) { AddRow(a, y, rw, rowH); y += rowH; }
             list.ResumeLayout();
 
@@ -1267,9 +1530,16 @@ namespace Jackamixer
 
         void AddRow(Channel ch, int y, int w, int h)
         {
-            var row = new ChannelRow(ch, s) { Bounds = new Rectangle(0, y, w, h) };
-            list.Controls.Add(row);
+            var row = new ChannelRow(ch, s, showGear) { Bounds = new Rectangle(0, y, w, h) };
+            row.OptionsClicked += (o, e) => OpenOptions();
+            AddOther(row);
             rows.Add(row);
+        }
+
+        void AddOther(Control c)
+        {
+            HookRightClick(c);
+            list.Controls.Add(c);
         }
     }
 
@@ -1282,21 +1552,27 @@ namespace Jackamixer
         public const int WM_TOGGLE = 0x8001; // WM_APP + 1
         public const int WM_QUIT_HOST = 0x8002;
         public const int WM_RELOAD = 0x8003;
-        public const int WM_CHANGE_HOTKEY = 0x8004;
-        public const int WM_CHOOSE_BACKGROUND = 0x8005;
+        public const int WM_OPTIONS = 0x8004;
         const int WM_HOTKEY = 0x0312;
         MixerForm form;
+        OptionsDialog options;
+        Size lastMixerSize = new Size(380, 540);
+        bool reopenMixer;
 
         public Host()
         {
             CreateHandle(new CreateParams { Caption = Title });
         }
 
-        // Runs the action after the flyout has closed.
-        public void Request(int msg)
+        // Shows the options after the flyout has closed. From the mixer itself, the mixer comes back afterwards.
+        public void OpenOptions(Size mixerSize, bool fromMixer)
         {
-            Native.PostMessage(Handle, msg, IntPtr.Zero, IntPtr.Zero);
+            lastMixerSize = mixerSize;
+            reopenMixer = fromMixer;
+            Native.PostMessage(Handle, WM_OPTIONS, IntPtr.Zero, IntPtr.Zero);
         }
+
+        public void PauseHotkey() { Native.UnregisterHotKey(Handle, 1); }
 
         // Returns null when the hotkey is active, otherwise a message for the user.
         public string RegisterFromConfig()
@@ -1307,7 +1583,7 @@ namespace Jackamixer
             if (!Config.ParseHotkey(text, out mods, out vk))
                 return "Could not read the hotkey \"" + text + "\" in Jackamixer.ini. Examples: Win+\\, Ctrl+Alt+M, F13.";
             if (!Native.RegisterHotKey(Handle, 1, mods | 0x4000, vk)) // MOD_NOREPEAT
-                return text + " is already taken by Windows or another app. Open Jackamixer from the Start menu and click Change hotkey.";
+                return text + " is already taken by Windows or another app. Open Jackamixer from the Start menu, right-click it and pick another.";
             return null;
         }
 
@@ -1324,6 +1600,7 @@ namespace Jackamixer
 
         public void Toggle()
         {
+            if (options != null) { options.Activate(); return; }
             if (form != null && !form.IsDisposed) { form.Close(); return; }
             form = new MixerForm(false, this);
             form.FormClosed += (o, e) =>
@@ -1334,24 +1611,15 @@ namespace Jackamixer
             form.Show();
         }
 
-        void ChangeHotkey()
+        void ShowOptions()
         {
-            Native.UnregisterHotKey(Handle, 1); // so the current combo can be pressed in the dialog
-            using (var dlg = new HotkeyDialog(this)) dlg.ShowDialog();
+            if (options != null) { options.Activate(); return; }
+            using (options = new OptionsDialog(this, lastMixerSize)) options.ShowDialog();
+            options = null;
             string err = RegisterFromConfig();
             if (err != null) MessageBox.Show(err, "Jackamixer");
-        }
-
-        void ChooseBackground()
-        {
-            using (var dlg = new OpenFileDialog())
-            {
-                dlg.Title = "Pick a background picture for Jackamixer";
-                dlg.Filter = "Pictures|*.png;*.jpg;*.jpeg;*.bmp;*.gif|All files|*.*";
-                if (dlg.ShowDialog() != DialogResult.OK) return;
-                Config.Set("background", dlg.FileName);
-            }
-            Toggle(); // reopen so the new picture shows
+            if (reopenMixer) Toggle(); // back to the mixer so the changes show
+            reopenMixer = false;
         }
 
         protected override void WndProc(ref Message m)
@@ -1360,8 +1628,10 @@ namespace Jackamixer
             {
                 case WM_HOTKEY:
                 case WM_TOGGLE: Toggle(); return;
-                case WM_CHANGE_HOTKEY: ChangeHotkey(); return;
-                case WM_CHOOSE_BACKGROUND: ChooseBackground(); return;
+                case WM_OPTIONS:
+                    if (m.WParam != IntPtr.Zero) reopenMixer = false; // sent by "Jackamixer.exe --options"
+                    ShowOptions();
+                    return;
                 case WM_RELOAD:
                     string err = RegisterFromConfig();
                     MessageBox.Show(err ?? ("Hotkey set to " + Config.ReadHotkey() + "."), "Jackamixer");
@@ -1382,14 +1652,13 @@ namespace Jackamixer
         {
             string first = args.Length > 0 ? args[0].ToLowerInvariant() : "";
             bool background = first == "--background" || first == "--reload";
-            string snapshot = first == "--snapshot" && args.Length > 1 ? args[1] : null;
 
             Native.SetProcessDPIAware();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Theme.Load();
 
-            if (snapshot != null) { Snapshot(snapshot); return; }
+            if ((first == "--snapshot" || first == "--snapshot-options") && args.Length > 1) { Snapshot(first == "--snapshot-options", args[1]); return; }
 
             bool created;
             using (var mutex = new Mutex(true, @"Local\Jackamixer", out created))
@@ -1401,8 +1670,9 @@ namespace Jackamixer
                     if (h != IntPtr.Zero && first != "--background")
                     {
                         Native.AllowSetForegroundWindow(-1);
-                        int msg = first == "--quit" ? Host.WM_QUIT_HOST : first == "--reload" ? Host.WM_RELOAD : Host.WM_TOGGLE;
-                        Native.PostMessage(h, msg, IntPtr.Zero, IntPtr.Zero);
+                        int msg = first == "--quit" ? Host.WM_QUIT_HOST : first == "--reload" ? Host.WM_RELOAD :
+                                  first == "--options" ? Host.WM_OPTIONS : Host.WM_TOGGLE;
+                        Native.PostMessage(h, msg, new IntPtr(1), IntPtr.Zero);
                     }
                     return;
                 }
@@ -1412,17 +1682,22 @@ namespace Jackamixer
                 string err = host.RegisterFromConfig();
                 if (err != null) MessageBox.Show(err, "Jackamixer");
                 else if (first == "--reload") MessageBox.Show("Hotkey set to " + Config.ReadHotkey() + ".", "Jackamixer");
-                if (!background) host.Toggle();
+                if (first == "--options") host.OpenOptions(new Size(380, 540), false);
+                else if (!background) host.Toggle();
                 Application.Run();
                 host.DestroyHandle();
             }
         }
 
-        static void Snapshot(string file)
+        // Renders a window to a PNG without user interaction (for checking the look).
+        static void Snapshot(bool optionsWindow, string file)
         {
-            var form = new MixerForm(true, null);
+            Form form;
+            if (optionsWindow) form = new OptionsDialog(null, new Size(380, 540));
+            else form = new MixerForm(true, null);
             form.Show();
-            for (int i = 0; i < 30; i++) { form.Step(); Application.DoEvents(); Thread.Sleep(33); }
+            var mixer = form as MixerForm;
+            for (int i = 0; i < 30; i++) { if (mixer != null) mixer.Step(); Application.DoEvents(); Thread.Sleep(33); }
             using (var bmp = new Bitmap(form.Width, form.Height))
             {
                 form.DrawToBitmap(bmp, new Rectangle(0, 0, form.Width, form.Height));

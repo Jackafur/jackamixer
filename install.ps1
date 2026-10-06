@@ -20,6 +20,13 @@ $menu.WorkingDirectory = $dir
 $menu.Description = 'Volume mixer with level meters'
 $menu.Save()
 
+$opts = $ws.CreateShortcut((Join-Path $programs 'Jackamixer Options.lnk'))
+$opts.TargetPath = $exe
+$opts.Arguments = '--options'
+$opts.WorkingDirectory = $dir
+$opts.Description = 'Jackamixer hotkey and background'
+$opts.Save()
+
 $auto = $ws.CreateShortcut((Join-Path $startup 'Jackamixer (hotkey).lnk'))
 $auto.TargetPath = $exe
 $auto.Arguments = '--background'
@@ -27,4 +34,4 @@ $auto.WorkingDirectory = $dir
 $auto.Save()
 
 Start-Process $exe -ArgumentList '--background'
-Write-Host 'Jackamixer installed. Press Win+\ to open it (change it from the link at the bottom of the mixer).'
+Write-Host 'Jackamixer installed. Press Win+\ to open it. Start menu > Jackamixer Options changes the hotkey and background.'
