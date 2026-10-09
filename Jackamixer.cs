@@ -26,8 +26,121 @@ namespace Jackamixer
     [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IMMDeviceEnumerator
     {
-        [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
+        [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IMMDeviceCollection devices);
         [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
+    }
+
+    [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDeviceCollection
+    {
+        [PreserveSig] int GetCount(out int count);
+        [PreserveSig] int Item(int index, out IMMDevice device);
+    }
+
+    // Undocumented but stable since Windows 7: what the Sound control panel uses for "Set as default".
+    [ComImport, Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")]
+    class PolicyConfigCo { }
+
+    [ComImport, Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPolicyConfig
+    {
+        // unused slots, declared only to keep the order
+        [PreserveSig] int GetMixFormat();
+        [PreserveSig] int GetDeviceFormat();
+        [PreserveSig] int ResetDeviceFormat();
+        [PreserveSig] int SetDeviceFormat();
+        [PreserveSig] int GetProcessingPeriod();
+        [PreserveSig] int SetProcessingPeriod();
+        [PreserveSig] int GetShareMode();
+        [PreserveSig] int SetShareMode();
+        [PreserveSig] int GetPropertyValue();
+        [PreserveSig] int SetPropertyValue();
+        [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string id, int role);
+    }
+
+    // Windows' own per-app output setting (Settings > System > Sound > Volume mixer), through the undocumented
+    // factory that page uses (the same one EarTrumpet uses). If a Windows update breaks it, Available is
+    // false and the app menu simply doesn't show.
+    static class AppRouting
+    {
+        [DllImport("combase.dll", CharSet = CharSet.Unicode)] static extern int WindowsCreateString(string s, int len, out IntPtr h);
+        [DllImport("combase.dll")] static extern int WindowsDeleteString(IntPtr h);
+        [DllImport("combase.dll")] static extern IntPtr WindowsGetStringRawBuffer(IntPtr h, out int len);
+        [DllImport("combase.dll")] static extern int RoGetActivationFactory(IntPtr classId, ref Guid iid, out IntPtr factory);
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int SetFn(IntPtr self, uint pid, int flow, int role, IntPtr device);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int GetFn(IntPtr self, uint pid, int flow, int role, out IntPtr device);
+
+        const string Prefix = @"\\?\SWD#MMDEVAPI#";
+        const string Suffix = "#{e6327cad-dcec-4949-ae8a-991e976a79d2}";
+        static IntPtr factory;
+        static bool tried;
+        static SetFn set;
+        static GetFn get;
+
+        public static bool Available { get { Init(); return factory != IntPtr.Zero; } }
+
+        static void Init()
+        {
+            if (tried) return;
+            tried = true;
+            try
+            {
+                const string cls = "Windows.Media.Internal.AudioPolicyConfig";
+                IntPtr h;
+                if (WindowsCreateString(cls, cls.Length, out h) < 0) return;
+                try
+                {
+                    // Windows 11 / 10 21H2+ first, then the older id
+                    foreach (string g in new[] { "ab3d4648-e242-459f-b02f-541c70306324", "2a59116d-6c4f-45e0-a74f-707e3fef9258" })
+                    {
+                        Guid iid = new Guid(g);
+                        IntPtr f;
+                        if (RoGetActivationFactory(h, ref iid, out f) >= 0 && f != IntPtr.Zero) { factory = f; break; }
+                    }
+                }
+                finally { WindowsDeleteString(h); }
+                if (factory == IntPtr.Zero) return;
+                // IUnknown (3) + IInspectable (3) + 19 slots we don't use, then Set (25) and Get (26)
+                IntPtr vt = Marshal.ReadIntPtr(factory);
+                set = (SetFn)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(vt, 25 * IntPtr.Size), typeof(SetFn));
+                get = (GetFn)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(vt, 26 * IntPtr.Size), typeof(GetFn));
+            }
+            catch { factory = IntPtr.Zero; }
+        }
+
+        // The device this app is sent to, or null when it follows the Windows default.
+        public static string Get(uint pid)
+        {
+            if (!Available || pid == 0) return null;
+            IntPtr h;
+            if (get(factory, pid, 0, 1, out h) < 0 || h == IntPtr.Zero) return null; // eRender, eMultimedia
+            try
+            {
+                int len;
+                IntPtr buf = WindowsGetStringRawBuffer(h, out len);
+                string s = len > 0 ? Marshal.PtrToStringUni(buf, len) : null;
+                if (string.IsNullOrEmpty(s)) return null;
+                if (s.StartsWith(Prefix)) s = s.Substring(Prefix.Length);
+                if (s.EndsWith(Suffix)) s = s.Substring(0, s.Length - Suffix.Length);
+                return s;
+            }
+            finally { WindowsDeleteString(h); }
+        }
+
+        // deviceId null = back to the Windows default. True when Windows took it.
+        public static bool Set(uint pid, string deviceId)
+        {
+            if (!Available || pid == 0) return false;
+            IntPtr h = IntPtr.Zero;
+            if (deviceId != null)
+            {
+                string full = Prefix + deviceId + Suffix;
+                if (WindowsCreateString(full, full.Length, out h) < 0) return false;
+            }
+            try { return set(factory, pid, 0, 0, h) >= 0 & set(factory, pid, 0, 1, h) >= 0; } // eConsole, eMultimedia
+            finally { if (h != IntPtr.Zero) WindowsDeleteString(h); }
+        }
     }
 
     [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -262,6 +375,7 @@ namespace Jackamixer
     class SessionRef
     {
         public string Id;
+        public uint Pid;
         public ISimpleAudioVolume Vol;
         public IAudioMeterInformation Meter;
     }
@@ -271,6 +385,7 @@ namespace Jackamixer
     {
         public bool IsSystem;
         public string HideId; // "discord.exe" style id used by hidden_apps; null when it can't be hidden
+        public string OutputId, OutputName; // set when Windows sends this app to a device other than the default
         public readonly List<SessionRef> Sessions = new List<SessionRef>();
 
         public override float Volume
@@ -325,11 +440,57 @@ namespace Jackamixer
         readonly Dictionary<string, string> nameCache = new Dictionary<string, string>();
         readonly Dictionary<string, Bitmap> iconCache = new Dictionary<string, Bitmap>();
         readonly int iconPx;
+        readonly Dictionary<string, IAudioSessionManager2> managers = new Dictionary<string, IAudioSessionManager2>();
         IAudioSessionManager2 mgr;
         public string DeviceId;
         public MasterChannel Master;
+        public bool ReadRouting; // look up each app's own output device (the app output menu is on)
+
+        public class Device { public string Id, Name; public IMMDevice Dev; }
 
         public AudioEngine(int iconPx) { this.iconPx = iconPx; }
+
+        // Output devices that are plugged in and enabled.
+        public List<Device> ReadDevices()
+        {
+            var list = new List<Device>();
+            IMMDeviceCollection col;
+            if (en.EnumAudioEndpoints(0, 1, out col) < 0 || col == null) return list; // eRender, DEVICE_STATE_ACTIVE
+            int n;
+            col.GetCount(out n);
+            for (int i = 0; i < n; i++)
+            {
+                IMMDevice d;
+                if (col.Item(i, out d) < 0 || d == null) continue;
+                string id;
+                if (d.GetId(out id) < 0 || id == null) continue;
+                list.Add(new Device { Id = id, Name = DeviceName(d), Dev = d });
+            }
+            list.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase));
+            return list;
+        }
+
+        // Makes this the Windows default output (all three roles, like the taskbar's sound flyout).
+        public bool SetDefault(string id)
+        {
+            try
+            {
+                var pc = (IPolicyConfig)new PolicyConfigCo();
+                bool ok = true;
+                for (int role = 0; role < 3; role++) ok &= pc.SetDefaultEndpoint(id, role) >= 0;
+                return ok;
+            }
+            catch { return false; }
+        }
+
+        // Sends every process of this app to a device (null = follow the default again).
+        public bool SetAppOutput(AppChannel app, string id)
+        {
+            bool ok = true;
+            var done = new HashSet<uint>();
+            foreach (var r in app.Sessions) if (r.Pid != 0 && done.Add(r.Pid)) ok &= AppRouting.Set(r.Pid, id);
+            return ok && done.Count > 0;
+        }
 
         public string CurrentDefaultId()
         {
@@ -351,6 +512,7 @@ namespace Jackamixer
             var ev = Activate(dev, typeof(IAudioEndpointVolume).GUID) as IAudioEndpointVolume;
             var em = Activate(dev, typeof(IAudioMeterInformation).GUID) as IAudioMeterInformation;
             mgr = Activate(dev, typeof(IAudioSessionManager2).GUID) as IAudioSessionManager2;
+            if (mgr != null) managers[id] = mgr;
             if (ev == null || em == null) return false;
             Master = new MasterChannel(ev, em, DeviceName(dev));
             return true;
@@ -360,6 +522,18 @@ namespace Jackamixer
         {
             object o;
             return d.Activate(ref iid, 23, IntPtr.Zero, out o) >= 0 ? o : null; // CLSCTX_ALL
+        }
+
+        // "Speakers (2- ODAC-revB USB DAC)" -> "ODAC-revB USB DAC", "1 - VG248 (AMD ...)" -> "1 - VG248": short enough for a row.
+        static string ShortName(string full)
+        {
+            int open = full.IndexOf(" (");
+            if (open < 0 || !full.EndsWith(")")) return full;
+            string outer = full.Substring(0, open), inner = full.Substring(open + 2, full.Length - open - 3);
+            if (outer != "Speakers" && outer != "Headphones" && outer != "Headset" && outer != "Line Out" && outer != "Digital Output") return outer;
+            int dash = inner.IndexOf("- ");
+            if (dash > 0 && dash <= 3 && char.IsDigit(inner[0])) inner = inner.Substring(dash + 2);
+            return inner;
         }
 
         static string DeviceName(IMMDevice d)
@@ -374,13 +548,53 @@ namespace Jackamixer
             return string.IsNullOrEmpty(s) ? "Speakers" : s;
         }
 
+        // Apps from every output device, not just the default: an app sent to the headset still gets its row.
         public List<AppChannel> ReadApps()
         {
             var list = new List<AppChannel>();
             if (mgr == null) return list;
             var map = new Dictionary<string, AppChannel>();
+            var devices = ReadDevices();
+            var names = new Dictionary<string, string>();
+            foreach (var d in devices)
+            {
+                names[d.Id] = d.Name;
+                IAudioSessionManager2 m;
+                if (!managers.TryGetValue(d.Id, out m))
+                {
+                    m = Activate(d.Dev, typeof(IAudioSessionManager2).GUID) as IAudioSessionManager2;
+                    managers[d.Id] = m;
+                }
+                if (m != null) ReadSessions(m, map, list);
+            }
+            if (!managers.ContainsKey(DeviceId ?? "")) ReadSessions(mgr, map, list);
+            if (ReadRouting && AppRouting.Available)
+            {
+                foreach (var a in list)
+                {
+                    foreach (var r in a.Sessions)
+                    {
+                        string o = AppRouting.Get(r.Pid);
+                        if (o == null) continue;
+                        string nm;
+                        a.OutputId = o;
+                        if (o != DeviceId && names.TryGetValue(o, out nm)) a.OutputName = ShortName(nm);
+                        break;
+                    }
+                }
+            }
+            list.Sort((a, b) =>
+            {
+                if (a.IsSystem != b.IsSystem) return a.IsSystem ? -1 : 1;
+                return string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase);
+            });
+            return list;
+        }
+
+        void ReadSessions(IAudioSessionManager2 m, Dictionary<string, AppChannel> map, List<AppChannel> list)
+        {
             IAudioSessionEnumerator e;
-            if (mgr.GetSessionEnumerator(out e) < 0 || e == null) return list;
+            if (m.GetSessionEnumerator(out e) < 0 || e == null) return;
             int n;
             e.GetCount(out n);
             for (int i = 0; i < n; i++)
@@ -409,14 +623,8 @@ namespace Jackamixer
                 }
                 string inst;
                 c.GetSessionInstanceIdentifier(out inst);
-                ch.Sessions.Add(new SessionRef { Id = inst ?? "", Vol = o as ISimpleAudioVolume, Meter = o as IAudioMeterInformation });
+                ch.Sessions.Add(new SessionRef { Id = inst ?? "", Pid = sys ? 0 : pid, Vol = o as ISimpleAudioVolume, Meter = o as IAudioMeterInformation });
             }
-            list.Sort((a, b) =>
-            {
-                if (a.IsSystem != b.IsSystem) return a.IsSystem ? -1 : 1;
-                return string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase);
-            });
-            return list;
         }
 
         string ResolveName(IAudioSessionControl2 c, string key, string path, bool sys)
@@ -583,7 +791,7 @@ namespace Jackamixer
     {
         public const string DefaultHotkey = @"Win+\";
         static readonly string[] Order = { "hotkey", "background", "background_dim", "background_zoom", "background_x", "background_y", "show_gear", "right_click_options", "hidden_apps", "hotkey_mode",
-            "use_windows_colors", "accent", "theme", "text_shadow", "gradient_meters", "animate", "icon_glow", "stereo_meters", "compact", "frosted", "icon_idle", "icon_lit", "text_idle", "text_lit", "bar_idle", "bar_lit", "bar_opacity", "knob_fade", "now_playing" };
+            "use_windows_colors", "accent", "theme", "text_shadow", "gradient_meters", "animate", "icon_glow", "stereo_meters", "compact", "frosted", "icon_idle", "icon_lit", "text_idle", "text_lit", "bar_idle", "bar_lit", "bar_opacity", "knob_fade", "now_playing", "device_menu", "app_output_menu" };
 
         static string FilePath
         {
@@ -620,6 +828,8 @@ namespace Jackamixer
                 case "bar_lit": return "100";
                 case "knob_fade": return "1";
                 case "now_playing": return "1";
+                case "device_menu": return "1";
+                case "app_output_menu": return "1";
                 case "bar_opacity": return "100";
             }
             return "";
@@ -645,7 +855,8 @@ namespace Jackamixer
             return d;
         }
 
-        static void Save(Dictionary<string, string> d)
+        // False when the file couldn't be written (read-only, no rights).
+        static bool Save(Dictionary<string, string> d)
         {
             var sb = new StringBuilder();
             sb.Append("; Jackamixer settings. Easiest way to change these: Start menu > Jackamixer Options.\r\n");
@@ -670,13 +881,15 @@ namespace Jackamixer
             sb.Append("; bar_opacity          10 to 100, opacity of the slider tracks and level meters.\r\n");
             sb.Append("; knob_fade            1 = the slider knobs follow bar_opacity too, 0 = knobs stay solid.\r\n");
             sb.Append("; now_playing          1 = show what's playing (title, artist, play/pause) under Speakers.\r\n");
+            sb.Append("; device_menu          1 = click the Speakers name to switch the Windows output (speakers, headset, ...).\r\n");
+            sb.Append("; app_output_menu      1 = click an app's name to send just that app to another output.\r\n");
             foreach (string k in Order)
             {
                 string v;
                 if (!d.TryGetValue(k, out v)) v = Default(k);
                 sb.Append(k).Append('=').Append(v).Append("\r\n");
             }
-            try { File.WriteAllText(FilePath, sb.ToString()); } catch { }
+            try { File.WriteAllText(FilePath, sb.ToString()); return true; } catch { return false; }
         }
 
         public static string Get(string key)
@@ -692,11 +905,11 @@ namespace Jackamixer
             return Math.Max(min, Math.Min(max, v));
         }
 
-        public static void Set(string key, string value)
+        public static bool Set(string key, string value)
         {
             var d = Load();
             d[key] = value;
-            Save(d);
+            return Save(d);
         }
 
         public static void SetMany(params string[] pairs)
@@ -831,29 +1044,42 @@ namespace Jackamixer
         static Bitmap frame;
         static Bitmap source;
         static string sourcePath;
+        static string failedPath;
 
         // Small cached copy of the picture, so a 4K wallpaper doesn't sit in memory.
-        public static Bitmap Source(string path)
+        public static Bitmap Source(string path) { return Source(path, false); }
+
+        // reload = the user just picked this file: read it again even if it's the cached one.
+        // A picture that won't open never replaces the current one.
+        public static Bitmap Source(string path, bool reload)
         {
             if (string.IsNullOrEmpty(path)) return null;
-            if (path == sourcePath) return source;
-            if (source != null) source.Dispose();
-            source = null;
-            sourcePath = path;
+            if (!reload && path == sourcePath) return source;
+            if (!reload && path == failedPath) return null;
+            Bitmap fresh = null;
             try
             {
                 using (var img = Image.FromFile(path))
                 {
                     float k = Math.Min(1f, 1600f / Math.Max(img.Width, img.Height));
-                    source = new Bitmap(Math.Max(1, (int)(img.Width * k)), Math.Max(1, (int)(img.Height * k)));
-                    using (var g = Graphics.FromImage(source))
+                    fresh = new Bitmap(Math.Max(1, (int)(img.Width * k)), Math.Max(1, (int)(img.Height * k)));
+                    using (var g = Graphics.FromImage(fresh))
                     {
                         g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                        g.DrawImage(img, 0, 0, source.Width, source.Height);
+                        g.DrawImage(img, 0, 0, fresh.Width, fresh.Height);
                     }
                 }
             }
-            catch { source = null; }
+            catch
+            {
+                if (fresh != null) fresh.Dispose();
+                failedPath = path;
+                return null;
+            }
+            failedPath = null;
+            if (source != null) source.Dispose();
+            source = fresh;
+            sourcePath = path;
             return source;
         }
 
@@ -1066,8 +1292,10 @@ namespace Jackamixer
     {
         public readonly Channel Ch;
         public event EventHandler OptionsClicked;
+        public event EventHandler NameClicked; // the output device menu (Speakers row: default device; app rows: that app)
+        public bool Picker;                    // the name opens that menu
         readonly bool gear;
-        bool hover, dragging, gearHover;
+        bool hover, dragging, gearHover, nameHover;
         float vol;
         bool muted;
         readonly float[] shown = new float[2], hold = new float[2]; // left, right (mono uses [0])
@@ -1101,6 +1329,13 @@ namespace Jackamixer
         }
 
         Rectangle GearRect { get { return gear ? new Rectangle(X1 - P(16), NameY - P(2), P(24), P(24)) : Rectangle.Empty; } }
+
+        int TextRight { get { return gear ? GearRect.Left - P(6) : X1; } }
+
+        // Where the name (plus the device it plays on) is drawn: clicking it opens the output menu.
+        Rectangle NameRect { get { return new Rectangle(X0 - P(1), NameY, TextRight - X0 - P(52), Math.Max(P(16), SliderY - P(10) - NameY)); } }
+
+        public Rectangle NameBounds { get { return NameRect; } }
 
         // -60 dB .. 0 dB mapped onto the bar, so quiet audio still shows.
         static float MeterPos(float p)
@@ -1210,7 +1445,7 @@ namespace Jackamixer
                 tg = Graphics.FromImage(textLayer);
                 Backdrop.Paint(tg, this, hover);
             }
-            DrawLabel(tg, Ch.Name, Theme.NameFont, new Rectangle(x0 - P(1), NameY, textRight - x0 - P(52), P(20)), muted ? Theme.SubText : Theme.Text, left);
+            DrawName(tg, new Rectangle(x0 - P(1), NameY, textRight - x0 - P(52), P(20)), left);
             string pct = muted ? "Muted" : ((int)Math.Round(vol * 100)).ToString();
             DrawLabel(tg, pct, Theme.NameFont, new Rectangle(textRight - P(56), NameY, P(58), P(20)), Theme.SubText, right);
             if (tg != g)
@@ -1274,6 +1509,35 @@ namespace Jackamixer
         }
 
         Bitmap barLayer, textLayer;
+
+        // Name, then the device the app is sent to (when it isn't the default), then a small arrow while the
+        // pointer is over a name that opens the output menu. The name gives way first when space runs out.
+        static int Measure(Graphics g, string text)
+        {
+            // measured without the ellipsis flag: with it, a zero-size box measures as almost nothing
+            return TextRenderer.MeasureText(g, text, Theme.NameFont, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width + 1;
+        }
+
+        void DrawName(Graphics g, Rectangle r, TextFormatFlags flags)
+        {
+            var app = Ch as AppChannel;
+            string dev = app != null && app.OutputName != null ? "→ " + app.OutputName : null;
+            bool chevron = Picker && nameHover;
+            int gap = P(6), chevW = chevron ? P(14) : 0;
+            int devW = dev == null ? 0 : Math.Min(Measure(g, dev), r.Width / 2);
+            int room = r.Width - chevW - (dev == null ? 0 : devW + gap);
+            int nameW = Math.Min(Measure(g, Ch.Name), Math.Max(P(20), room));
+            DrawLabel(g, Ch.Name, Theme.NameFont, new Rectangle(r.X, r.Y, nameW, r.Height), muted ? Theme.SubText : Theme.Text, flags);
+            int x = r.X + nameW;
+            if (dev != null)
+            {
+                DrawLabel(g, dev, Theme.NameFont, new Rectangle(x + gap, r.Y, devW, r.Height), Theme.SubText, flags);
+                x += gap + devW;
+            }
+            if (chevron)
+                DrawLabel(g, "", Theme.SmallGlyph, new Rectangle(x + P(3), r.Y, chevW, r.Height), Theme.SubText,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+        }
 
         protected override void Dispose(bool disposing)
         {
@@ -1340,7 +1604,7 @@ namespace Jackamixer
         }
 
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
-        protected override void OnMouseLeave(EventArgs e) { hover = false; gearHover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; gearHover = false; nameHover = false; Cursor = Cursors.Default; Invalidate(); base.OnMouseLeave(e); }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
@@ -1352,6 +1616,11 @@ namespace Jackamixer
                 return;
             }
             if (e.Button == MouseButtons.Middle || (e.Button == MouseButtons.Left && IconRect.Contains(e.Location))) { ToggleMute(); return; }
+            if (e.Button == MouseButtons.Left && Picker && NameRect.Contains(e.Location))
+            {
+                if (NameClicked != null) NameClicked(this, EventArgs.Empty);
+                return;
+            }
             if (e.Button == MouseButtons.Left && e.X >= X0 - P(12) && e.Y >= SliderY - P(10)) { dragging = true; SetFromX(e.X); }
         }
 
@@ -1360,7 +1629,8 @@ namespace Jackamixer
             base.OnMouseMove(e);
             if (dragging) { SetFromX(e.X); return; }
             bool g = GearRect.Contains(e.Location);
-            if (g != gearHover) { gearHover = g; Cursor = g ? Cursors.Hand : Cursors.Default; Invalidate(); }
+            bool n = Picker && NameRect.Contains(e.Location);
+            if (g != gearHover || n != nameHover) { gearHover = g; nameHover = n; Cursor = g || n ? Cursors.Hand : Cursors.Default; Invalidate(); }
         }
 
         protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); dragging = false; Invalidate(); }
@@ -1744,6 +2014,8 @@ namespace Jackamixer
             MakeCheck(p, "Right-click menu (hide app, options)", "right_click_options", 0, P(266), w, null);
             MakeCheck(p, "Gear button opens options", "show_gear", 0, P(292), w, null);
             MakeCheck(p, "Show what's playing (song or video title, play/pause)", "now_playing", 0, P(318), w, null);
+            MakeCheck(p, "Click Speakers to switch the output (speakers, headset)", "device_menu", 0, P(344), w, null);
+            MakeCheck(p, "Click an app to pick where it plays", "app_output_menu", 0, P(370), w, null);
         }
 
         // ---- Background: picture, crop, darkness, frosted glass ----
@@ -2066,7 +2338,7 @@ namespace Jackamixer
                 DialogResult picked = dlg.ShowDialog(this);
                 childOpen = false;
                 if (picked != DialogResult.OK) return;
-                Bitmap src = Backdrop.Source(dlg.FileName);
+                Bitmap src = Backdrop.Source(dlg.FileName, true);
                 if (src == null)
                 {
                     childOpen = true;
@@ -2387,7 +2659,7 @@ namespace Jackamixer
         readonly float s;
         readonly bool snapshot;
         readonly Host host;
-        bool showGear, rightClickOptions, closeOnClickAway;
+        bool showGear, rightClickOptions, closeOnClickAway, deviceMenu, appMenu;
         HashSet<string> hidden;
         readonly ContextMenuStrip rowMenu = new ContextMenuStrip();
         MediaWatcher media;   // "now playing", only while that option is on
@@ -2409,6 +2681,8 @@ namespace Jackamixer
             showGear = Config.GetBool("show_gear");
             rightClickOptions = Config.GetBool("right_click_options");
             closeOnClickAway = Config.Get("hotkey_mode") != "toggle";
+            deviceMenu = Config.GetBool("device_menu");
+            appMenu = Config.GetBool("app_output_menu");
             hidden = Config.HiddenApps();
             rowMenu.Renderer = new MenuRenderer();
             rowMenu.ShowImageMargin = false;
@@ -2422,6 +2696,7 @@ namespace Jackamixer
             BackColor = Theme.Bg;
             using (var g = CreateGraphics()) s = g.DpiX / 96f;
             engine = new AudioEngine(P(26));
+            engine.ReadRouting = appMenu;
             list.Dock = DockStyle.Fill;
             list.AutoScroll = true;
             list.BackColor = Theme.Bg;
@@ -2514,9 +2789,12 @@ namespace Jackamixer
             showGear = Config.GetBool("show_gear");
             rightClickOptions = Config.GetBool("right_click_options");
             closeOnClickAway = Config.Get("hotkey_mode") != "toggle";
+            deviceMenu = Config.GetBool("device_menu");
+            appMenu = Config.GetBool("app_output_menu");
             hidden = Config.HiddenApps();
             showMedia = Config.GetBool("now_playing");
             if (showMedia) StartMedia(); else StopMedia();
+            engine.ReadRouting = appMenu;
             BackColor = Theme.Bg;
             list.BackColor = Theme.Bg;
             int dark = Theme.Dark ? 1 : 0;
@@ -2567,6 +2845,51 @@ namespace Jackamixer
             }
             rowMenu.Items.Add("Options...", null, (o, e) => BeginInvoke((Action)OpenOptions));
             rowMenu.Show(source, at);
+        }
+
+        // Click a name: on Speakers, pick the Windows default output; on an app, pick where that app plays
+        // (Windows' own per-app setting, the same one as Settings > Sound > Volume mixer).
+        void ShowOutputMenu(ChannelRow row)
+        {
+            var devices = engine.ReadDevices();
+            if (devices.Count == 0) return;
+            var app = row.Ch as AppChannel;
+            rowMenu.Items.Clear();
+            var head = new ToolStripMenuItem(app == null ? "Play sound on" : app.Name + " plays on") { Enabled = false };
+            rowMenu.Items.Add(head);
+            if (app != null)
+            {
+                string def = "Windows default";
+                foreach (var d in devices) if (d.Id == engine.DeviceId) def += " (" + d.Name + ")";
+                AddChoice(def, app.OutputId == null, () => engine.SetAppOutput(app, null));
+            }
+            foreach (var d in devices)
+            {
+                string id = d.Id;
+                bool current = app == null ? id == engine.DeviceId : id == app.OutputId;
+                if (app == null) AddChoice(d.Name, current, () => engine.SetDefault(id));
+                else AddChoice(d.Name, current, () => engine.SetAppOutput(app, id));
+            }
+            Rectangle nr = row.NameBounds;
+            rowMenu.Show(row, new Point(nr.Left, nr.Bottom));
+        }
+
+        void AddChoice(string text, bool current, Func<bool> pick)
+        {
+            var item = new ToolStripMenuItem((current ? "✓  " : "      ") + text);
+            if (current) item.Font = new Font(Theme.NameFont, FontStyle.Bold);
+            item.Click += (o, e) =>
+            {
+                bool ok = false;
+                try { ok = pick(); } catch { }
+                // after the menu has closed: the rows are rebuilt with the new device
+                BeginInvoke((Action)(() =>
+                {
+                    if (!ok) MessageBox.Show(this, "Windows didn't take that change.", "Jackamixer");
+                    try { RefreshChannels(true); } catch { }
+                }));
+            };
+            rowMenu.Items.Add(item);
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -2651,6 +2974,7 @@ namespace Jackamixer
             {
                 sb.Append('|').Append(a.Key);
                 foreach (var r in a.Sessions) sb.Append(',').Append(r.Id);
+                sb.Append('>').Append(a.OutputId);
             }
             string sig = sb.ToString();
             if (!force && sig == signature) return;
@@ -2731,6 +3055,8 @@ namespace Jackamixer
         {
             var row = new ChannelRow(ch, s, showGear) { Bounds = new Rectangle(0, y, w, h) };
             row.OptionsClicked += (o, e) => OpenOptions();
+            row.Picker = ch.IsMaster ? deviceMenu : appMenu && !((AppChannel)ch).IsSystem && AppRouting.Available;
+            row.NameClicked += (o, e) => ShowOutputMenu(row);
             AddOther(row);
             rows.Add(row);
         }
@@ -2824,7 +3150,7 @@ namespace Jackamixer
             if (!Config.ParseHotkey(text, out mods, out vk)) return "Could not use " + text + ". Try another.";
             if (!Native.RegisterHotKey(Handle, 1, mods | 0x4000, vk)) return text + " is already used by Windows or another app. Try another.";
             Native.UnregisterHotKey(Handle, 1);
-            Config.Set("hotkey", text);
+            if (!Config.Set("hotkey", text)) return "Could not save to Jackamixer.ini (is it read-only?). The old hotkey stays.";
             return null;
         }
 

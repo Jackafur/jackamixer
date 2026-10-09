@@ -7,6 +7,7 @@ A small volume mixer for Windows 10/11 with live level meters. One row per app: 
 - Press **Win+\\** to open it, press it again (or Esc, or click away) to close.
 - No tray icon. A hidden listener holds the hotkey (about 24 MB RAM, 0% CPU while idle); the mixer window only exists while it is open.
 - Apps with several processes (browsers, Discord) get one row.
+- Switch between speakers and headset from the mixer, or send one app (Discord, a game) to a different output than the rest.
 - Apps light up when they play sound: quiet apps fade back, the one making noise stands out.
 - Shows what's playing (song or video title and artist, from YouTube, Spotify and the like) with previous / play-pause / next.
 - Follows your Windows accent color and light/dark mode, or pick your own colors.
@@ -31,6 +32,8 @@ To remove it, run `uninstall.ps1`, then delete the folder.
 | --- | --- |
 | Drag the slider, or scroll on a row | change volume (scroll = 2% per notch) |
 | Click the app icon, or middle-click the row | mute / unmute |
+| Click the **Speakers** name | switch the Windows output (speakers, headset, ...) |
+| Click an app's name | send just that app to another output, or back to the Windows default; the row then shows where it plays (→ Headset) |
 | Right-click an app > **Hide** | take it out of the mixer (bring it back in Options) |
 | Right-click > **Options...**, or Start menu > **Jackamixer Options** | change how it looks and works (see below) |
 
@@ -44,13 +47,15 @@ While Options is open the mixer stays up next to it and changes as you go, so yo
 
 | Tab | What's there |
 | --- | --- |
-| General | hotkey (press the keys you want), whether the hotkey **opens** the mixer (click away closes it) or **toggles** it, right-click menu, gear button, show what's playing |
+| General | hotkey (press the keys you want), whether the hotkey **opens** the mixer (click away closes it) or **toggles** it, right-click menu, gear button, show what's playing, click Speakers to switch the output, click an app to pick where it plays |
 | Background | picture with drag-to-move, zoom and darkness; frosted glass (your blurred wallpaper) when there's no picture |
 | Look | use Windows colors, or your own accent color and dark/light background; bar opacity (when light-up is off), and whether the slider knobs fade with it |
 | Effects | text shadow, smooth gradient meters, open/close animation, stereo meters, compact rows, and "apps light up when they play sound" with resting and light-up opacity for icons, names and bars |
 | Apps | tick or untick which apps show in the mixer |
 
 Why is iCUE (or Discord, OBS, Wallpaper Engine) bouncing when it isn't making sound? Apps with audio-reactive features listen to your speakers, Windows lists that as a session on your speakers, and its meter shows everything it hears. Hide it if it bugs you.
+
+Picking an app's output uses the same Windows setting as Settings > System > Sound > Volume mixer, so the choice sticks for that app and shows up there too. It goes through an interface Windows doesn't document; if an update ever breaks it, app names just stop opening the menu. Switching the output sets the Windows default for everything (sound, and the communications device apps like Discord use).
 
 ## Settings file
 
@@ -69,6 +74,8 @@ icon_lit=100
 bar_idle=100
 bar_lit=100
 now_playing=1
+device_menu=1
+app_output_menu=1
 hidden_apps=icue.exe
 ```
 
